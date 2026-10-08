@@ -276,7 +276,11 @@ SOURCE PASSAGES:
 
         start = time.perf_counter()
 
-        raw_response = await ollama_client.generate(messages)
+        # JSON mode enabled only for final answer
+        raw_response = await ollama_client.generate(
+            messages,
+            json_mode=True,
+        )
 
         print(
             f"[TIMING] Final LLM generation: {time.perf_counter() - start:.2f}s",
