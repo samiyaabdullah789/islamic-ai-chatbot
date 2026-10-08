@@ -1,4 +1,6 @@
+
 import json
+import time
 
 from app.rag.retriever import rag_retriever
 from app.rag.reranker import rag_reranker
@@ -101,22 +103,38 @@ class RAGPipeline:
         conversation_history: list[dict[str, str]],
     ) -> str:
 
+        pipeline_start = time.perf_counter()
+
         # -------------------------------------------------
         # 1. Build context-aware retrieval query
         # -------------------------------------------------
+
+        start = time.perf_counter()
 
         retrieval_query = await self._build_retrieval_query(
             question=question,
             conversation_history=conversation_history,
         )
 
+        print(
+            f"[TIMING] Query rewriting: {time.perf_counter() - start:.2f}s",
+            flush=True,
+        )
+
         # -------------------------------------------------
         # 2. Retrieve relevant passages from ChromaDB
         # -------------------------------------------------
 
+        start = time.perf_counter()
+
         documents = await rag_retriever.retrieve(
             retrieval_query,
             limit=10,
+        )
+
+        print(
+            f"[TIMING] ChromaDB retrieval: {time.perf_counter() - start:.2f}s",
+            flush=True,
         )
 
         if not documents:
@@ -129,10 +147,17 @@ class RAGPipeline:
         # 3. Rerank and keep the most relevant passages
         # -------------------------------------------------
 
+        start = time.perf_counter()
+
         documents = await rag_reranker.rerank(
             question=retrieval_query,
             documents=documents,
             limit=5,
+        )
+
+        print(
+            f"[TIMING] Reranking: {time.perf_counter() - start:.2f}s",
+            flush=True,
         )
 
         if not documents:
@@ -145,6 +170,8 @@ class RAGPipeline:
         # 4. Prepare retrieved source passages
         # -------------------------------------------------
 
+        start = time.perf_counter()
+
         source_parts = []
 
         for index, document in enumerate(documents):
@@ -155,6 +182,11 @@ class RAGPipeline:
             )
 
         source_context = "\n\n".join(source_parts)
+
+        print(
+            f"[TIMING] Context preparation: {time.perf_counter() - start:.2f}s",
+            flush=True,
+        )
 
         # -------------------------------------------------
         # 5. Generate answer from retrieved knowledge
@@ -167,6 +199,7 @@ Your job is to answer the user's question using the trusted Islamic
 SOURCE PASSAGES retrieved for that question.
 
 The SOURCE PASSAGES are the knowledge source.
+
 Your role is to understand them and generate a clear, natural answer
 to the user's specific question.
 
@@ -227,6 +260,7 @@ Return ONLY valid JSON in exactly this structure:
 }}
 
 Do not use markdown.
+
 Do not include any text before or after the JSON.
 
 SOURCE PASSAGES:
@@ -240,7 +274,14 @@ SOURCE PASSAGES:
             {"role": "user", "content": question},
         ]
 
+        start = time.perf_counter()
+
         raw_response = await ollama_client.generate(messages)
+
+        print(
+            f"[TIMING] Final LLM generation: {time.perf_counter() - start:.2f}s",
+            flush=True,
+        )
 
         # -------------------------------------------------
         # TEMPORARY DEBUG
@@ -264,6 +305,8 @@ SOURCE PASSAGES:
         # -------------------------------------------------
         # 6. Parse structured response
         # -------------------------------------------------
+
+        start = time.perf_counter()
 
         try:
             cleaned_response = raw_response.strip()
@@ -290,6 +333,11 @@ SOURCE PASSAGES:
                 "I couldn't generate a reliable source-based answer "
                 "for this question."
             )
+
+        print(
+            f"[TIMING] JSON parsing: {time.perf_counter() - start:.2f}s",
+            flush=True,
+        )
 
         if not answer:
             return (
@@ -336,6 +384,11 @@ SOURCE PASSAGES:
         # -------------------------------------------------
         # 9. Final response
         # -------------------------------------------------
+
+        print(
+            f"[TIMING] RAG pipeline total: {time.perf_counter() - pipeline_start:.2f}s",
+            flush=True,
+        )
 
         return f"{answer}\n\n{citation_text}"
 
