@@ -1,5 +1,6 @@
 
 import json
+import re
 import time
 
 from app.rag.retriever import rag_retriever
@@ -15,8 +16,35 @@ class RAGPipeline:
         conversation_history: list[dict[str, str]],
     ) -> str:
 
-        # If there is no history, use the original question
+        question = question.strip()
+
         if not conversation_history:
+            return question
+
+        # Skip rewriting for clearly standalone questions.
+        # This is a heuristic, not a perfect follow-up detector.
+        follow_up_words = {
+            "it", "its", "this", "that", "these", "those",
+            "they", "them", "their", "he", "she", "his",
+            "her", "which", "one", "ones",
+        }
+
+        words = set(re.findall(r"\b\w+\b", question.lower()))
+
+        follow_up_starts = (
+            "what about",
+            "how about",
+            "and ",
+            "but ",
+            "why ",
+        )
+
+        needs_context = (
+            bool(words.intersection(follow_up_words))
+            or question.lower().startswith(follow_up_starts)
+        )
+
+        if not needs_context:
             return question
 
         # Use only recent conversation context
@@ -105,9 +133,7 @@ class RAGPipeline:
 
         pipeline_start = time.perf_counter()
 
-        # -------------------------------------------------
         # 1. Build context-aware retrieval query
-        # -------------------------------------------------
 
         start = time.perf_counter()
 
@@ -121,9 +147,7 @@ class RAGPipeline:
             flush=True,
         )
 
-        # -------------------------------------------------
         # 2. Retrieve relevant passages from ChromaDB
-        # -------------------------------------------------
 
         start = time.perf_counter()
 
@@ -143,9 +167,7 @@ class RAGPipeline:
                 "to answer this question yet."
             )
 
-        # -------------------------------------------------
-        # 3. Rerank and keep the most relevant passages
-        # -------------------------------------------------
+        # 3. Select most relevant passages
 
         start = time.perf_counter()
 
@@ -166,9 +188,7 @@ class RAGPipeline:
                 "to answer this question."
             )
 
-        # -------------------------------------------------
         # 4. Prepare retrieved source passages
-        # -------------------------------------------------
 
         start = time.perf_counter()
 
@@ -188,9 +208,7 @@ class RAGPipeline:
             flush=True,
         )
 
-        # -------------------------------------------------
         # 5. Generate answer from retrieved knowledge
-        # -------------------------------------------------
 
         system_prompt = f"""
 You are an Islamic knowledge assistant.
@@ -287,9 +305,7 @@ SOURCE PASSAGES:
             flush=True,
         )
 
-        # -------------------------------------------------
         # TEMPORARY DEBUG
-        # -------------------------------------------------
 
         print("\n===== RAG DEBUG =====")
         print("Original question:", question)
@@ -306,9 +322,7 @@ SOURCE PASSAGES:
         print(raw_response)
         print("=====================\n")
 
-        # -------------------------------------------------
         # 6. Parse structured response
-        # -------------------------------------------------
 
         start = time.perf_counter()
 
@@ -349,9 +363,7 @@ SOURCE PASSAGES:
                 "information to answer this question."
             )
 
-        # -------------------------------------------------
         # 7. Validate sources selected by the LLM
-        # -------------------------------------------------
 
         valid_source_indexes = []
 
@@ -360,7 +372,7 @@ SOURCE PASSAGES:
             for source_index in used_sources:
 
                 if (
-                    isinstance(source_index, int)
+                    type(source_index) is int
                     and 0 <= source_index < len(documents)
                     and source_index not in valid_source_indexes
                 ):
@@ -372,9 +384,7 @@ SOURCE PASSAGES:
                 "to answer this question."
             )
 
-        # -------------------------------------------------
         # 8. Build citations from actual stored metadata
-        # -------------------------------------------------
 
         citations = [
             self._build_citation(
@@ -385,9 +395,7 @@ SOURCE PASSAGES:
 
         citation_text = "\n".join(citations)
 
-        # -------------------------------------------------
         # 9. Final response
-        # -------------------------------------------------
 
         print(
             f"[TIMING] RAG pipeline total: {time.perf_counter() - pipeline_start:.2f}s",
