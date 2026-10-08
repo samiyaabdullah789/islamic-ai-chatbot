@@ -1,7 +1,10 @@
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_current_user_id
+# Temporary JWT authentication - disabled for now
+# from app.api.dependencies import get_current_user_id
+
 from app.db.session import get_db
 from app.repositories.conversation_repository import conversation_repository
 from app.schemas.conversation import ConversationCreate, ConversationResponse
@@ -11,13 +14,19 @@ from app.schemas.message import MessageResponse
 
 router = APIRouter(prefix="/conversations")
 
+# Temporary development user.
+# Must be replaced with real app authentication before public deployment.
+DEV_USER_ID = "1"
+
 
 @router.post("", response_model=ConversationResponse)
 def create_conversation(
     request: ConversationCreate,
-    user_id: str = Depends(get_current_user_id),
+    # user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
+    user_id = DEV_USER_ID
+
     conversation = conversation_repository.create(
         db=db,
         user_id=user_id,
@@ -29,9 +38,11 @@ def create_conversation(
 
 @router.get("", response_model=list[ConversationResponse])
 def get_conversations(
-    user_id: str = Depends(get_current_user_id),
+    # user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
+    user_id = DEV_USER_ID
+
     conversations = conversation_repository.get_all_by_user(
         db=db,
         user_id=user_id,
@@ -43,9 +54,11 @@ def get_conversations(
 @router.get("/{conversation_id}", response_model=ConversationResponse)
 def get_conversation(
     conversation_id: int,
-    user_id: str = Depends(get_current_user_id),
+    # user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
+    user_id = DEV_USER_ID
+
     conversation = conversation_repository.get_by_id_and_user(
         db=db,
         conversation_id=conversation_id,
@@ -60,15 +73,18 @@ def get_conversation(
 
     return conversation
 
+
 @router.get(
     "/{conversation_id}/messages",
     response_model=list[MessageResponse],
 )
 def get_conversation_messages(
     conversation_id: int,
-    user_id: str = Depends(get_current_user_id),
+    # user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
+    user_id = DEV_USER_ID
+
     conversation = conversation_repository.get_by_id_and_user(
         db=db,
         conversation_id=conversation_id,
