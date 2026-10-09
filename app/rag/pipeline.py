@@ -1,4 +1,3 @@
-
 import json
 import re
 import time
@@ -12,15 +11,11 @@ class RAGPipeline:
 
     @staticmethod
     def _normalize_text(text: str) -> str:
-        return re.sub(
-            r"\s+", " ", text
-        ).strip().casefold()
+        return re.sub(r"\s+", " ", text).strip().casefold()
 
     @staticmethod
     def _words(text: str) -> set[str]:
-        return set(
-            re.findall(r"\b\w+\b", text.lower())
-        )
+        return set(re.findall(r"\b\w+\b", text.lower()))
 
     @staticmethod
     def _is_hadith_request(question: str) -> bool:
@@ -32,167 +27,13 @@ class RAGPipeline:
             )
         )
 
-    def _is_prayer_virtue_question(
-        self,
-        question: str,
-    ) -> bool:
-
-        words = self._words(question)
-
-        return bool(
-            words & {
-                "namaz", "salah", "salat",
-                "prayer", "prayers"
-            }
-        ) and bool(
-            words & {
-                "importance", "virtue", "virtues",
-                "reward", "rewards", "benefit",
-                "benefits"
-            }
-        )
-
-    def _select_prayer_reward_hadith(
-        self,
-        documents: list[dict],
-    ) -> dict | None:
-
-        phrases = (
-            "reward of the prayer",
-            "reward of prayer",
-            "reward of the prayers",
-            "reward of congregational prayer",
-            "reward of the noon prayer",
-        )
-
-        for document in documents:
-            content = document.get("content", "")
-            normalized = self._normalize_text(content)
-            words = self._words(content)
-
-            if len(words) < 35:
-                continue
-
-            if not (
-                words & {
-                    "prayer", "prayers",
-                    "praying", "salah"
-                }
-            ):
-                continue
-
-            if not words & {"reward", "rewards"}:
-                continue
-
-            if any(
-                phrase in normalized
-                for phrase in phrases
-            ):
-                return document
-
-        return None
-
-    def _select_fast_hadith(
-        self,
-        question: str,
-        documents: list[dict],
-    ) -> dict | None:
-
-        words = self._words(question)
-
-        prayer_words = {
-            "namaz", "salah", "salat",
-            "prayer", "prayers"
-        }
-
-        if self._is_prayer_virtue_question(question):
-            allowed_prayer_words = (
-                prayer_words
-                | {
-                    "give", "me", "one", "a", "an",
-                    "hadith", "hadees", "hadeeth",
-                    "hadis", "about", "on",
-                    "regarding", "the", "please",
-                    "tell", "share", "of",
-                    "importance", "virtue", "virtues",
-                    "reward", "rewards", "benefit",
-                    "benefits",
-                }
-            )
-
-            if words <= allowed_prayer_words:
-                return self._select_prayer_reward_hadith(
-                    documents
-                )
-
-            return None
-
-        fasting_words = {
-            "fast", "fasting", "roza",
-            "rozay", "sawm", "saum"
-        }
-
-        if not words & fasting_words:
-            return None
-
-        allowed_fasting_words = (
-            fasting_words
-            | {
-                "give", "me", "one", "a", "an",
-                "hadith", "hadees", "hadeeth",
-                "hadis", "about", "on",
-                "regarding", "the", "please",
-                "tell", "share", "of",
-                "importance", "virtue", "virtues",
-                "reward", "rewards", "benefit",
-                "benefits",
-            }
-        )
-
-        if not words <= allowed_fasting_words:
-            return None
-
-        phrases = (
-            "fasting is a shield",
-            "fasting is a screen",
-            "the fast is for me",
-            "fasting which is for me",
-        )
-
-        for document in documents:
-            content = document.get("content", "")
-            normalized = self._normalize_text(content)
-            metadata = document.get("metadata") or {}
-
-            if len(self._words(content)) < 35:
-                continue
-
-            if not all(
-                metadata.get(key) is not None
-                for key in (
-                    "source_name", "volume",
-                    "book", "hadith_number"
-                )
-            ):
-                continue
-
-            if any(
-                phrase in normalized
-                for phrase in phrases
-            ):
-                return document
-
-        return None
-
     @staticmethod
     def _build_citation(document: dict) -> str:
         metadata = document.get("metadata") or {}
 
-        source = metadata.get(
-            "source_name", "Unknown source"
-        )
-
-        parts = [str(source)]
+        parts = [
+            str(metadata.get("source_name") or "Unknown source")
+        ]
 
         for key, label in (
             ("volume", "Volume"),
@@ -218,6 +59,7 @@ class RAGPipeline:
         valid = []
 
         for item in evidence:
+
             if not isinstance(item, dict):
                 continue
 
@@ -234,6 +76,7 @@ class RAGPipeline:
                 continue
 
             normalized_quote = self._normalize_text(quote)
+
             normalized_source = self._normalize_text(
                 documents[index].get("content", "")
             )
@@ -262,23 +105,24 @@ class RAGPipeline:
 
         words = self._words(question)
 
-        follow_up_words = {
+        references = {
             "it", "its", "this", "that",
-            "these", "those", "they",
-            "them", "their", "he", "she",
-            "his", "her", "ones",
+            "these", "those", "they", "them",
+            "their", "he", "she", "his",
+            "her", "ones",
         }
 
         follow_up_starts = (
-            "what about", "how about",
-            "and ", "but ", "why ",
+            "what about",
+            "how about",
+            "and ",
+            "but ",
+            "why ",
         )
 
         needs_context = (
-            bool(words & follow_up_words)
-            or question.lower().startswith(
-                follow_up_starts
-            )
+            bool(words & references)
+            or question.lower().startswith(follow_up_starts)
         )
 
         if not needs_context:
@@ -294,11 +138,10 @@ class RAGPipeline:
             {
                 "role": "system",
                 "content": (
-                    "Rewrite the latest question as "
-                    "a standalone Islamic search query. "
-                    "Use conversation history only to "
-                    "resolve references. Return only "
-                    "the rewritten query."
+                    "Rewrite the latest question as a standalone "
+                    "Islamic search query. Use conversation history "
+                    "only to resolve references. "
+                    "Return only the rewritten query."
                 ),
             },
             {
@@ -310,9 +153,9 @@ class RAGPipeline:
             },
         ]
 
-        result = await ollama_client.generate(messages)
+        rewritten = await ollama_client.generate(messages)
 
-        return result.strip() or question
+        return rewritten.strip() or question
 
     async def generate(
         self,
@@ -321,6 +164,8 @@ class RAGPipeline:
     ) -> str:
 
         pipeline_start = time.perf_counter()
+
+        # STEP 1: Build retrieval query
 
         start = time.perf_counter()
 
@@ -334,6 +179,8 @@ class RAGPipeline:
             f"{time.perf_counter() - start:.2f}s",
             flush=True,
         )
+
+        # STEP 2: Retrieve source passages
 
         start = time.perf_counter()
 
@@ -354,6 +201,8 @@ class RAGPipeline:
                 "in the available Islamic sources."
             )
 
+        # STEP 3: Rerank passages
+
         start = time.perf_counter()
 
         documents = await rag_reranker.rerank(
@@ -370,77 +219,145 @@ class RAGPipeline:
 
         if not documents:
             return (
-                "I couldn't find sufficiently relevant "
-                "Islamic source passages."
+                "I couldn't find relevant passages "
+                "in the available Islamic sources."
             )
 
-        # Extractive fast path for supported Hadith requests.
-        if self._is_hadith_request(question):
-            selected = self._select_fast_hadith(
-                question,
-                documents,
-            )
+        # STEP 4: Identify request type
 
-            if selected is not None:
-                print(
-                    "[RAG] Fast extractive Hadith path",
-                    flush=True,
-                )
+        hadith_request = self._is_hadith_request(question)
 
-                print(
-                    f"[TIMING] RAG pipeline total: "
-                    f"{time.perf_counter() - pipeline_start:.2f}s",
-                    flush=True,
-                )
-
-                return (
-                    f"{selected['content'].strip()}\n\n"
-                    f"{self._build_citation(selected)}"
-                )
-
-        # General questions: one LLM call.
-        # Keep context compact.
         source_context = "\n\n".join(
             f"PASSAGE {index}\n"
             f"{document.get('content', '')}"
             for index, document in enumerate(documents)
         )
 
+        # STEP 5: Prepare task instructions
+
+        if hadith_request:
+
+            task = """
+The user is requesting a Hadith.
+
+Your task:
+1. Read the user's exact question.
+2. Select ONE Hadith directly relevant to the topic.
+3. Identify a short exact quote that proves relevance.
+4. Do not rewrite or summarize the Hadith.
+5. Set the answer field to "selected".
+6. The application will return the original source text.
+7. If no Hadith directly matches, return an empty answer
+   and empty evidence.
+"""
+
+        else:
+
+            task = """
+The user is asking a general Islamic question.
+
+Your task:
+1. Understand exactly what the user is asking.
+2. Read the available source passages carefully.
+3. Identify the statement that DIRECTLY answers
+   the user's question.
+4. Use that direct statement as your primary evidence.
+5. Generate a clear, natural answer in your own words.
+6. Preserve the original meaning and context.
+7. Do not add conditions, exceptions, restrictions,
+   or conclusions that are not directly supported
+   by the selected evidence.
+8. If a passage contains multiple statements,
+   use the statement that answers the question,
+   not an unrelated statement from the same passage.
+9. If a passage describes one specific incident,
+   explain it as that incident. Do not invent a
+   universal rule from it.
+10. Do not combine unrelated statements into
+    a new Islamic ruling.
+11. If the sources only support a limited answer,
+    give that limited answer rather than guessing.
+12. If the sources do not answer the question,
+    return an empty answer and empty evidence.
+
+IMPORTANT:
+The evidence quote must support the actual answer,
+not merely be present somewhere in the same passage.
+
+Before returning JSON, internally check:
+- Does my answer directly address the question?
+- Does my selected evidence support my answer?
+- Have I added any unsupported condition?
+- Have I changed the meaning of the source?
+
+If any claim is unsupported, remove that claim.
+"""
+
+        # STEP 6: Build LLM prompt
+
         system_prompt = f"""
-You are an Islamic knowledge assistant.
+You are a careful Islamic knowledge assistant.
 
-Answer ONLY using the source passages below.
+Answer questions using ONLY the supplied Islamic sources.
 
-Rules:
-1. Never invent facts, Hadith text, or references.
-2. Use only information directly supported by
-   the supplied passages.
-3. If the passages do not support an answer,
-   return an empty answer and empty evidence.
-4. Keep the answer concise.
-5. Evidence quotes must be copied EXACTLY.
-6. For each quote, copy a SHORT continuous
-   substring of 6 to 15 words from one passage.
-7. Do not change punctuation, spelling,
-   capitalization, or quotation marks.
-8. Never paraphrase inside the evidence quote.
-9. Return valid JSON only.
+{task}
 
-Output:
+GENERAL RULES:
+
+1. Never invent Islamic facts, Hadith text,
+   Quranic verses, or references.
+
+2. Never use outside knowledge to fill gaps
+   in the supplied passages.
+
+3. Never misrepresent the original meaning
+   or context of a source.
+
+4. Keep answers concise, clear, and natural.
+
+5. For general questions, explain the source
+   in your own words.
+
+6. For Hadith requests, select the Hadith;
+   the application returns the original text.
+
+7. Evidence must directly support the answer.
+
+8. Evidence quotes must be copied exactly
+   from the supplied source passage.
+
+9. Each evidence quote must contain
+   6 to 15 continuous words.
+
+10. Do not change punctuation, capitalization,
+    spelling, or wording inside evidence quotes.
+
+11. If the sources are insufficient,
+    do not guess.
+
+12. Return valid JSON only.
+
+JSON FORMAT:
+
 {{
-  "answer": "Concise supported answer",
-  "evidence": [
-    {{
-      "source_index": 0,
-      "quote": "Exact continuous quote from passage"
-    }}
-  ]
+    "answer": "Source-supported answer",
+    "evidence": [
+        {{
+            "source_index": 0,
+            "quote": "Exact continuous quote from passage"
+        }}
+    ]
 }}
 
-For Hadith requests, select a directly relevant
-passage. The application will return its original text.
+If no answer is supported:
+
+{{
+    "answer": "",
+    "evidence": []
+}}
 
 SOURCE PASSAGES:
+
 {source_context}
 """
 
@@ -456,6 +373,8 @@ SOURCE PASSAGES:
             },
         ]
 
+        # STEP 7: Generate answer using Ollama
+
         start = time.perf_counter()
 
         raw_response = await ollama_client.generate(
@@ -469,16 +388,24 @@ SOURCE PASSAGES:
             flush=True,
         )
 
+        # STEP 8: Debug logs
+
         print("\n===== RAG DEBUG =====", flush=True)
         print("Question:", question, flush=True)
 
         for index, document in enumerate(documents):
-            print(f"PASSAGE {index}", flush=True)
+
+            print(
+                f"PASSAGE {index}",
+                flush=True,
+            )
+
             print(
                 "Content:",
                 document.get("content"),
                 flush=True,
             )
+
             print(
                 "Metadata:",
                 document.get("metadata"),
@@ -490,9 +417,13 @@ SOURCE PASSAGES:
             raw_response,
             flush=True,
         )
+
         print("=====================\n", flush=True)
 
+        # STEP 9: Parse LLM JSON
+
         try:
+
             cleaned = raw_response.strip()
 
             if cleaned.startswith("```"):
@@ -514,9 +445,11 @@ SOURCE PASSAGES:
                 raise ValueError("Invalid answer")
 
             answer = answer.strip()
+
             evidence = result.get("evidence", [])
 
         except (ValueError, TypeError):
+
             return (
                 "I couldn't generate a reliable "
                 "source-based answer."
@@ -527,6 +460,8 @@ SOURCE PASSAGES:
                 "The available passages don't provide "
                 "enough evidence to answer this question."
             )
+
+        # STEP 10: Verify source evidence
 
         valid_indexes = self._validated_source_indexes(
             evidence,
@@ -539,7 +474,10 @@ SOURCE PASSAGES:
                 "for this answer."
             )
 
-        if self._is_hadith_request(question):
+        # STEP 11: Original Hadith output
+
+        if hadith_request:
+
             selected_index = valid_indexes[0]
 
             answer = documents[selected_index].get(
@@ -551,10 +489,14 @@ SOURCE PASSAGES:
         if not answer:
             return "No verified source text is available."
 
-        citations = [
-            self._build_citation(documents[index])
-            for index in valid_indexes
-        ]
+        # STEP 12: Attach citations
+
+        citations = list(
+            dict.fromkeys(
+                self._build_citation(documents[index])
+                for index in valid_indexes
+            )
+        )
 
         print(
             f"[TIMING] RAG pipeline total: "
