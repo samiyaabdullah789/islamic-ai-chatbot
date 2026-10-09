@@ -7,25 +7,35 @@ from app.vector_store.chroma_store import chroma_store
 
 class RAGRetriever:
 
+    @staticmethod
+    def _words(text: str) -> set[str]:
+        return set(re.findall(r"\b\w+\b", text.lower()))
+
     def build_search_queries(self, query: str) -> list[str]:
         queries = [query]
-        words = set(re.findall(r"\b\w+\b", query.lower()))
+        words = self._words(query)
 
-        prayer_words = {
+        prayer = {
             "namaz", "salah", "salat", "prayer", "prayers"
         }
-        virtue_words = {
+        virtues = {
             "importance", "virtue", "virtues",
             "reward", "rewards", "benefit", "benefits"
         }
+        zakat = {"zakat", "zakah"}
+        definition = {
+            "what", "meaning", "definition", "define"
+        }
 
-        if (
-            words.intersection(prayer_words)
-            and words.intersection(virtue_words)
-        ):
+        if words & prayer and words & virtues:
             queries.append(
-                "reward virtues blessings of congregational "
-                "prayer salah mosque"
+                "reward of congregational prayer salah mosque"
+            )
+
+        elif words & zakat and words & definition:
+            queries.append(
+                "Zakat obligatory charity duty of Islam "
+                "payment of Zakat poor needy"
             )
 
         return list(dict.fromkeys(queries))
@@ -37,7 +47,15 @@ class RAGRetriever:
     ) -> list[dict]:
 
         search_queries = self.build_search_queries(query)
-        embeddings = await embedding_service.embed(search_queries)
+
+        embeddings = await embedding_service.embed(
+            search_queries
+        )
+
+        if len(embeddings) != len(search_queries):
+            raise ValueError(
+                "Embedding count does not match search queries"
+            )
 
         documents_by_id = {}
 
@@ -47,15 +65,17 @@ class RAGRetriever:
                 limit=limit,
             )
 
+            ids = results.get("ids", [[]])[0]
+            contents = results.get("documents", [[]])[0]
+            metadatas = results.get("metadatas", [[]])[0]
+            distances = results.get("distances", [[]])[0]
+
             for doc_id, content, metadata, distance in zip(
-                results["ids"][0],
-                results["documents"][0],
-                results["metadatas"][0],
-                results["distances"][0],
+                ids, contents, metadatas, distances
             ):
                 document = {
                     "id": doc_id,
-                    "content": content,
+                    "content": content or "",
                     "metadata": metadata or {},
                     "distance": distance,
                 }
@@ -64,13 +84,28 @@ class RAGRetriever:
 
                 if (
                     previous is None
-                    or distance < previous["distance"]
+                    or (
+                        isinstance(distance, (int, float))
+                        and (
+                            not isinstance(
+                                previous["distance"],
+                                (int, float),
+                            )
+                            or distance < previous["distance"]
+                        )
+                    )
                 ):
                     documents_by_id[doc_id] = document
 
         return sorted(
             documents_by_id.values(),
-            key=lambda item: item["distance"],
+            key=lambda doc: (
+                doc["distance"]
+                if isinstance(
+                    doc["distance"], (int, float)
+                )
+                else float("inf")
+            ),
         )
 
 
