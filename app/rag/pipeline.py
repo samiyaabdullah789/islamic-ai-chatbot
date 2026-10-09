@@ -24,10 +24,10 @@ class RAGPipeline:
         # Skip rewriting for clearly standalone questions.
         # This is a heuristic, not a perfect follow-up detector.
         follow_up_words = {
-            "it", "its", "this", "that", "these", "those",
-            "they", "them", "their", "he", "she", "his",
-            "her", "which", "one", "ones",
-        }
+    "it", "its", "this", "that", "these", "those",
+    "they", "them", "their", "he", "she", "his",
+    "her", "ones",
+}
 
         words = set(re.findall(r"\b\w+\b", question.lower()))
 

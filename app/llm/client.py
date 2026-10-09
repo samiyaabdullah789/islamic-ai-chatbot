@@ -1,4 +1,3 @@
-
 import time
 import httpx
 
@@ -10,6 +9,10 @@ class OllamaClient:
     def __init__(self):
         self.base_url = settings.LLM_BASE_URL
         self.model = settings.LLM_MODEL
+
+        self.client = httpx.AsyncClient(
+            timeout=httpx.Timeout(180.0, connect=10.0)
+        )
 
     async def generate(
         self,
@@ -23,41 +26,49 @@ class OllamaClient:
             "model": self.model,
             "messages": messages,
             "stream": False,
+            "think": False,
+            "keep_alive": "30m",
+            "options": {
+                "num_predict": 350,
+                "temperature": 0.1,
+            },
         }
 
         if json_mode:
             payload["format"] = "json"
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(
-                f"{self.base_url}/api/chat",
-                json=payload,
-            )
+        response = await self.client.post(
+            f"{self.base_url}/api/chat",
+            json=payload,
+        )
 
-            response.raise_for_status()
-            data = response.json()
+        response.raise_for_status()
+        data = response.json()
 
-            print(
-                f"[TIMING] Ollama HTTP request: "
-                f"{time.perf_counter() - start:.2f}s",
-                flush=True,
-            )
+        print(
+            f"[TIMING] Ollama HTTP request: "
+            f"{time.perf_counter() - start:.2f}s",
+            flush=True,
+        )
 
-            for key in (
-                "load_duration",
-                "prompt_eval_duration",
-                "eval_duration",
-            ):
-                duration = data.get(key)
+        for key in (
+            "load_duration",
+            "prompt_eval_duration",
+            "eval_duration",
+        ):
+            duration = data.get(key)
 
-                if isinstance(duration, (int, float)):
-                    print(
-                        f"[TIMING] Ollama {key}: "
-                        f"{duration / 1_000_000_000:.2f}s",
-                        flush=True,
-                    )
+            if isinstance(duration, (int, float)):
+                print(
+                    f"[TIMING] Ollama {key}: "
+                    f"{duration / 1_000_000_000:.2f}s",
+                    flush=True,
+                )
 
-            return data["message"]["content"]
+        return data["message"]["content"]
+
+    async def close(self):
+        await self.client.aclose()
 
 
 ollama_client = OllamaClient()
