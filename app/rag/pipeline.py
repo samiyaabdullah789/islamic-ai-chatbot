@@ -10,6 +10,10 @@ from app.llm.client import ollama_client
 
 class RAGPipeline:
 
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        return re.sub(r"\s+", " ", text).strip().casefold()
+
     async def _build_retrieval_query(
         self,
         question: str,
@@ -21,13 +25,11 @@ class RAGPipeline:
         if not conversation_history:
             return question
 
-        # Skip rewriting for clearly standalone questions.
-        # This is a heuristic, not a perfect follow-up detector.
         follow_up_words = {
-    "it", "its", "this", "that", "these", "those",
-    "they", "them", "their", "he", "she", "his",
-    "her", "ones",
-}
+            "it", "its", "this", "that", "these",
+            "those", "they", "them", "their",
+            "he", "she", "his", "her", "ones",
+        }
 
         words = set(re.findall(r"\b\w+\b", question.lower()))
 
@@ -47,7 +49,6 @@ class RAGPipeline:
         if not needs_context:
             return question
 
-        # Use only recent conversation context
         recent_history = conversation_history[-4:]
 
         history_text = "\n".join(
@@ -59,61 +60,31 @@ class RAGPipeline:
             {
                 "role": "system",
                 "content": (
-                    "Your task is to convert the CURRENT QUESTION into a clear, "
-                    "standalone search query for retrieving relevant Islamic "
-                    "source passages.\n\n"
-
-                    "Use the CONVERSATION HISTORY to understand what the user "
-                    "is referring to in follow-up questions.\n\n"
-
-                    "If the current question contains references such as "
-                    "'it', 'this', 'that', 'these', 'those', 'they', 'them', "
-                    "'ones', or similar wording, replace those references with "
-                    "the actual subject from the conversation history.\n\n"
-
-                    "The standalone search query must preserve the meaning of "
-                    "the user's current question while including enough context "
-                    "for semantic retrieval.\n\n"
-
-                    "Example:\n"
-                    "Conversation history:\n"
-                    "user: What are the five pillars of Islam?\n"
-                    "assistant: The five pillars of Islam are...\n\n"
-                    "Current question:\n"
-                    "Which one of these is related to Ramadan?\n\n"
-                    "Standalone search query:\n"
-                    "Which of the five pillars of Islam is related to Ramadan?\n\n"
-
-                    "Do not answer the question.\n"
-                    "Do not add facts that are not present in the conversation.\n"
-                    "Do not use outside Islamic knowledge.\n"
-                    "If the current question is already clear and standalone, "
-                    "return it unchanged.\n\n"
-
-                    "Return ONLY the standalone search query."
+                    "Rewrite the current Islamic question as a "
+                    "standalone search query using conversation "
+                    "history only when necessary. "
+                    "Preserve the original meaning. "
+                    "Do not answer the question. "
+                    "Do not invent facts. "
+                    "Return only the search query."
                 ),
             },
             {
                 "role": "user",
                 "content": (
-                    f"CONVERSATION HISTORY:\n{history_text}\n\n"
-                    f"CURRENT QUESTION:\n{question}\n\n"
-                    "STANDALONE SEARCH QUERY:"
+                    f"Conversation history:\n{history_text}\n\n"
+                    f"Current question:\n{question}"
                 ),
             },
         ]
 
         retrieval_query = await ollama_client.generate(messages)
-        retrieval_query = retrieval_query.strip()
 
-        if not retrieval_query:
-            return question
-
-        return retrieval_query
+        return retrieval_query.strip() or question
 
     def _build_citation(self, document: dict) -> str:
 
-        metadata = document["metadata"]
+        metadata = document.get("metadata") or {}
 
         source_name = metadata.get("source_name", "Unknown")
         volume = metadata.get("volume", "Unknown")
@@ -125,6 +96,52 @@ class RAGPipeline:
             f"Book {book}, Hadith {hadith_number}]"
         )
 
+    def _validate_evidence(
+        self,
+        evidence: object,
+        documents: list[dict],
+    ) -> list[int]:
+
+        if not isinstance(evidence, list):
+            return []
+
+        valid_indexes = []
+
+        for item in evidence:
+
+            if not isinstance(item, dict):
+                continue
+
+            index = item.get("source_index")
+            quote = item.get("quote")
+
+            if type(index) is not int:
+                continue
+
+            if not 0 <= index < len(documents):
+                continue
+
+            if not isinstance(quote, str):
+                continue
+
+            normalized_quote = self._normalize_text(quote)
+
+            # Reject empty or extremely short evidence.
+            if len(normalized_quote.split()) < 6:
+                continue
+
+            source_text = self._normalize_text(
+                documents[index].get("content", "")
+            )
+
+            if normalized_quote not in source_text:
+                continue
+
+            if index not in valid_indexes:
+                valid_indexes.append(index)
+
+        return valid_indexes
+
     async def generate(
         self,
         question: str,
@@ -133,7 +150,7 @@ class RAGPipeline:
 
         pipeline_start = time.perf_counter()
 
-        # 1. Build context-aware retrieval query
+        # 1. Build retrieval query
 
         start = time.perf_counter()
 
@@ -143,11 +160,12 @@ class RAGPipeline:
         )
 
         print(
-            f"[TIMING] Query rewriting: {time.perf_counter() - start:.2f}s",
+            f"[TIMING] Query rewriting: "
+            f"{time.perf_counter() - start:.2f}s",
             flush=True,
         )
 
-        # 2. Retrieve relevant passages from ChromaDB
+        # 2. Retrieve source passages
 
         start = time.perf_counter()
 
@@ -157,17 +175,18 @@ class RAGPipeline:
         )
 
         print(
-            f"[TIMING] ChromaDB retrieval: {time.perf_counter() - start:.2f}s",
+            f"[TIMING] ChromaDB retrieval: "
+            f"{time.perf_counter() - start:.2f}s",
             flush=True,
         )
 
         if not documents:
             return (
-                "I don't have verified Islamic sources available "
-                "to answer this question yet."
+                "I don't have verified Islamic sources "
+                "available to answer this question yet."
             )
 
-        # 3. Select most relevant passages
+        # 3. Rerank retrieved passages
 
         start = time.perf_counter()
 
@@ -178,17 +197,18 @@ class RAGPipeline:
         )
 
         print(
-            f"[TIMING] Reranking: {time.perf_counter() - start:.2f}s",
+            f"[TIMING] Reranking: "
+            f"{time.perf_counter() - start:.2f}s",
             flush=True,
         )
 
         if not documents:
             return (
-                "I don't have enough relevant verified Islamic sources "
-                "to answer this question."
+                "I don't have enough relevant Islamic "
+                "source passages to answer this question."
             )
 
-        # 4. Prepare retrieved source passages
+        # 4. Prepare source context
 
         start = time.perf_counter()
 
@@ -196,90 +216,62 @@ class RAGPipeline:
 
         for index, document in enumerate(documents):
             source_parts.append(
-                f"""PASSAGE {index}
-
-{document["content"]}"""
+                f"PASSAGE {index}\n"
+                f"{document.get('content', '')}"
             )
 
         source_context = "\n\n".join(source_parts)
 
         print(
-            f"[TIMING] Context preparation: {time.perf_counter() - start:.2f}s",
+            f"[TIMING] Context preparation: "
+            f"{time.perf_counter() - start:.2f}s",
             flush=True,
         )
 
-        # 5. Generate answer from retrieved knowledge
+        # 5. Generate source-grounded answer
 
         system_prompt = f"""
 You are an Islamic knowledge assistant.
 
-Your job is to answer the user's question using the trusted Islamic
-SOURCE PASSAGES retrieved for that question.
+Answer the user's question using ONLY the SOURCE PASSAGES.
 
-The SOURCE PASSAGES are the knowledge source.
+IMPORTANT RULES:
 
-Your role is to understand them and generate a clear, natural answer
-to the user's specific question.
+1. Do not use pretrained Islamic knowledge to add facts.
+2. Never invent Hadith wording, narrators, or references.
+3. Answer the exact question, not merely a related topic.
+4. Conversation history is for understanding follow-up
+   questions, not for establishing Islamic facts.
+5. If the passages do not directly support an answer,
+   return an empty answer and empty evidence list.
+6. Keep answers concise and natural.
+7. For every factual claim, identify supporting evidence.
+8. Every evidence quote must be copied exactly from
+   the corresponding source passage.
+9. Do not cite a passage merely because it discusses
+   the same general topic.
+10. Do not invent supporting quotes.
+11. If a question asks for one Hadith, provide only one.
+12. Do not include citations inside the answer text.
 
-RULES:
-
-1. Answer exactly what the user asked.
-
-2. Islamic factual information in your answer must come from the
-   SOURCE PASSAGES.
-
-3. You may summarize, combine, simplify, and explain information from
-   the passages in natural language.
-
-4. You do not need to copy the wording of the passages.
-
-5. Do not introduce Islamic facts, names, rulings, numbers, events,
-   explanations, or details from your own pretrained knowledge when
-   they are not supported by the SOURCE PASSAGES.
-
-6. Conversation history may be used to understand what the user means,
-   especially in follow-up questions, but conversation history is not
-   a trusted Islamic source.
-
-7. Keep the answer focused on the user's question.
-   Do not include background information, related events, examples,
-   historical details, or additional explanations unless they are
-   necessary to answer the question.
-
-8. For a simple factual or yes/no question, give a short and direct
-   answer unless more explanation is necessary.
-
-9. If multiple passages contain the same supporting information,
-   you do not need to use all of them.
-
-10. Use the minimum number of passages needed to fully support the
-    answer. Prefer the passage or passages that most directly support
-    the answer.
-
-11. Do not select passages merely because they are related to the
-    topic. Select them only when they directly support information
-    actually included in your answer.
-
-12. If the retrieved passages do not contain enough information to
-    answer the question, clearly say that the available sources do not
-    provide enough information.
-
-13. Do not create citations, Hadith numbers, source names, or references.
-    The application will handle citations separately.
-
-14. In "used_sources", include only the passage numbers that directly
-    support the final answer.
-
-Return ONLY valid JSON in exactly this structure:
+Return ONLY valid JSON:
 
 {{
-    "answer": "A clear natural answer based on the retrieved passages.",
-    "used_sources": [0]
+    "answer": "Source-supported answer",
+    "evidence": [
+        {{
+            "source_index": 0,
+            "quote": "Exact supporting text from the passage"
+        }}
+    ]
 }}
 
-Do not use markdown.
+If no passage directly supports the answer, return:
 
-Do not include any text before or after the JSON.
+{{
+    "answer": "",
+    "evidence": []
+}}
 
 SOURCE PASSAGES:
 
@@ -288,117 +280,108 @@ SOURCE PASSAGES:
 
         messages = [
             {"role": "system", "content": system_prompt},
-            *conversation_history,
+            *conversation_history[-4:],
             {"role": "user", "content": question},
         ]
 
         start = time.perf_counter()
 
-        # JSON mode enabled only for final answer
         raw_response = await ollama_client.generate(
             messages,
             json_mode=True,
         )
 
         print(
-            f"[TIMING] Final LLM generation: {time.perf_counter() - start:.2f}s",
+            f"[TIMING] Final LLM generation: "
+            f"{time.perf_counter() - start:.2f}s",
             flush=True,
         )
 
-        # TEMPORARY DEBUG
-
-        print("\n===== RAG DEBUG =====")
-        print("Original question:", question)
-        print("Retrieval query:", retrieval_query)
-
-        print("\nRetrieved / reranked passages:")
+        # Temporary debug logs
+        print("\n===== RAG DEBUG =====", flush=True)
+        print("Original question:", question, flush=True)
+        print("Retrieval query:", retrieval_query, flush=True)
 
         for index, document in enumerate(documents):
-            print(f"\nPASSAGE {index}")
-            print("Content:", document["content"])
-            print("Metadata:", document["metadata"])
+            print(f"\nPASSAGE {index}", flush=True)
+            print("Content:", document.get("content"), flush=True)
+            print("Metadata:", document.get("metadata"), flush=True)
 
-        print("\nLLM raw response:")
-        print(raw_response)
-        print("=====================\n")
+        print("\nLLM raw response:", raw_response, flush=True)
+        print("=====================\n", flush=True)
 
         # 6. Parse structured response
 
         start = time.perf_counter()
 
         try:
-            cleaned_response = raw_response.strip()
+            cleaned = raw_response.strip()
 
-            if cleaned_response.startswith("```"):
-                cleaned_response = cleaned_response.strip("`")
+            if cleaned.startswith("```"):
+                cleaned = re.sub(
+                    r"^```(?:json)?\s*|\s*```$",
+                    "",
+                    cleaned,
+                    flags=re.IGNORECASE,
+                ).strip()
 
-                if cleaned_response.startswith("json"):
-                    cleaned_response = cleaned_response[4:].strip()
+            result = json.loads(cleaned)
 
-            result = json.loads(cleaned_response)
+            if not isinstance(result, dict):
+                raise ValueError("Expected JSON object")
 
-            answer = str(
-                result.get("answer", "")
-            ).strip()
+            answer = result.get("answer", "")
+            evidence = result.get("evidence", [])
 
-            used_sources = result.get(
-                "used_sources",
-                [],
-            )
+            if not isinstance(answer, str):
+                raise ValueError("Invalid answer")
+
+            answer = answer.strip()
 
         except (json.JSONDecodeError, TypeError, ValueError):
             return (
-                "I couldn't generate a reliable source-based answer "
-                "for this question."
+                "I couldn't generate a reliable "
+                "source-based answer for this question."
             )
 
         print(
-            f"[TIMING] JSON parsing: {time.perf_counter() - start:.2f}s",
+            f"[TIMING] JSON parsing: "
+            f"{time.perf_counter() - start:.2f}s",
             flush=True,
         )
 
         if not answer:
             return (
-                "The available sources do not provide enough "
-                "information to answer this question."
+                "The retrieved Islamic sources do not "
+                "provide enough information to answer "
+                "this question."
             )
 
-        # 7. Validate sources selected by the LLM
+        # 7. Validate exact supporting quotes
 
-        valid_source_indexes = []
-
-        if isinstance(used_sources, list):
-
-            for source_index in used_sources:
-
-                if (
-                    type(source_index) is int
-                    and 0 <= source_index < len(documents)
-                    and source_index not in valid_source_indexes
-                ):
-                    valid_source_indexes.append(source_index)
+        valid_source_indexes = self._validate_evidence(
+            evidence=evidence,
+            documents=documents,
+        )
 
         if not valid_source_indexes:
             return (
-                "I don't have enough verified source support "
-                "to answer this question."
+                "I couldn't verify the supporting "
+                "Hadith evidence for this answer."
             )
 
-        # 8. Build citations from actual stored metadata
+        # 8. Build citations from actual source metadata
 
         citations = [
-            self._build_citation(
-                documents[source_index]
-            )
-            for source_index in valid_source_indexes
+            self._build_citation(documents[index])
+            for index in valid_source_indexes
         ]
 
         citation_text = "\n".join(citations)
 
-        # 9. Final response
-
         print(
-            f"[TIMING] RAG pipeline total: {time.perf_counter() - pipeline_start:.2f}s",
+            f"[TIMING] RAG pipeline total: "
+            f"{time.perf_counter() - pipeline_start:.2f}s",
             flush=True,
         )
 
