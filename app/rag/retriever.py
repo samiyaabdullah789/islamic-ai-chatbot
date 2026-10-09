@@ -8,29 +8,26 @@ from app.vector_store.chroma_store import chroma_store
 class RAGRetriever:
 
     def build_search_queries(self, query: str) -> list[str]:
-
         queries = [query]
-        normalized = query.lower()
+        words = set(re.findall(r"\b\w+\b", query.lower()))
 
-        prayer_terms = {
-            "namaz", "salah", "salat",
-            "prayer", "prayers",
+        prayer_words = {
+            "namaz", "salah", "salat", "prayer", "prayers"
+        }
+        virtue_words = {
+            "importance", "virtue", "virtues",
+            "reward", "rewards", "benefit", "benefits"
         }
 
-        words = set(re.findall(r"\b\w+\b", normalized))
+        if (
+            words.intersection(prayer_words)
+            and words.intersection(virtue_words)
+        ):
+            queries.append(
+                "reward virtues blessings of congregational "
+                "prayer salah mosque"
+            )
 
-        if words.intersection(prayer_terms):
-
-            if words.intersection({
-                "importance", "virtue", "virtues",
-                "benefit", "benefits", "reward", "rewards",
-            }):
-                queries.extend([
-                    "virtues and rewards of performing salah prayer",
-                    "importance and benefits of daily obligatory prayers",
-                ])
-
-        # Remove duplicate queries
         return list(dict.fromkeys(queries))
 
     async def retrieve(
@@ -39,59 +36,42 @@ class RAGRetriever:
         limit: int = 5,
     ) -> list[dict]:
 
-        # 1. Prepare search queries
         search_queries = self.build_search_queries(query)
-
-        # 2. Generate embeddings in one batch
-        embeddings = await embedding_service.embed(
-            search_queries
-        )
+        embeddings = await embedding_service.embed(search_queries)
 
         documents_by_id = {}
 
-        # 3. Search ChromaDB for each query
         for query_embedding in embeddings:
-
             results = chroma_store.search(
                 query_embedding=query_embedding,
                 limit=limit,
             )
 
-            ids = results.get("ids", [[]])[0]
-            contents = results.get("documents", [[]])[0]
-            metadatas = results.get("metadatas", [[]])[0]
-            distances = results.get("distances", [[]])[0]
-
             for doc_id, content, metadata, distance in zip(
-                ids,
-                contents,
-                metadatas,
-                distances,
+                results["ids"][0],
+                results["documents"][0],
+                results["metadatas"][0],
+                results["distances"][0],
             ):
-
                 document = {
                     "id": doc_id,
                     "content": content,
-                    "metadata": metadata,
+                    "metadata": metadata or {},
                     "distance": distance,
                 }
 
-                # Keep best distance for duplicate documents
-                existing = documents_by_id.get(doc_id)
+                previous = documents_by_id.get(doc_id)
 
                 if (
-                    existing is None
-                    or distance < existing["distance"]
+                    previous is None
+                    or distance < previous["distance"]
                 ):
                     documents_by_id[doc_id] = document
 
-        # 4. Sort by semantic similarity
-        documents = sorted(
+        return sorted(
             documents_by_id.values(),
-            key=lambda doc: doc["distance"],
+            key=lambda item: item["distance"],
         )
-
-        return documents
 
 
 rag_retriever = RAGRetriever()
