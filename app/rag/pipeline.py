@@ -14,6 +14,16 @@ class RAGPipeline:
     def _normalize_text(text: str) -> str:
         return re.sub(r"\s+", " ", text).strip().casefold()
 
+    @staticmethod
+    def _is_hadith_request(question: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(hadith|hadees|hadeeth|hadis)\b",
+                question,
+                flags=re.IGNORECASE,
+            )
+        )
+
     async def _build_retrieval_query(
         self,
         question: str,
@@ -31,7 +41,9 @@ class RAGPipeline:
             "he", "she", "his", "her", "ones",
         }
 
-        words = set(re.findall(r"\b\w+\b", question.lower()))
+        words = set(
+            re.findall(r"\b\w+\b", question.lower())
+        )
 
         follow_up_starts = (
             "what about",
@@ -78,7 +90,9 @@ class RAGPipeline:
             },
         ]
 
-        retrieval_query = await ollama_client.generate(messages)
+        retrieval_query = await ollama_client.generate(
+            messages
+        )
 
         return retrieval_query.strip() or question
 
@@ -86,10 +100,14 @@ class RAGPipeline:
 
         metadata = document.get("metadata") or {}
 
-        source_name = metadata.get("source_name", "Unknown")
+        source_name = metadata.get(
+            "source_name", "Unknown"
+        )
         volume = metadata.get("volume", "Unknown")
         book = metadata.get("book", "Unknown")
-        hadith_number = metadata.get("hadith_number", "Unknown")
+        hadith_number = metadata.get(
+            "hadith_number", "Unknown"
+        )
 
         return (
             f"[{source_name}, Volume {volume}, "
@@ -124,9 +142,10 @@ class RAGPipeline:
             if not isinstance(quote, str):
                 continue
 
-            normalized_quote = self._normalize_text(quote)
+            normalized_quote = self._normalize_text(
+                quote
+            )
 
-            # Reject empty or extremely short evidence.
             if len(normalized_quote.split()) < 6:
                 continue
 
@@ -238,21 +257,41 @@ Answer the user's question using ONLY the SOURCE PASSAGES.
 IMPORTANT RULES:
 
 1. Do not use pretrained Islamic knowledge to add facts.
+
 2. Never invent Hadith wording, narrators, or references.
+
 3. Answer the exact question, not merely a related topic.
+
 4. Conversation history is for understanding follow-up
    questions, not for establishing Islamic facts.
+
 5. If the passages do not directly support an answer,
    return an empty answer and empty evidence list.
+
 6. Keep answers concise and natural.
+
 7. For every factual claim, identify supporting evidence.
+
 8. Every evidence quote must be copied exactly from
    the corresponding source passage.
+
 9. Do not cite a passage merely because it discusses
    the same general topic.
+
 10. Do not invent supporting quotes.
+
 11. If a question asks for one Hadith, provide only one.
+
 12. Do not include citations inside the answer text.
+
+13. For Hadith requests, choose only a passage that
+    directly answers the user's question.
+
+14. Do not select a passage simply because it contains
+    similar keywords.
+
+15. For Hadith requests, the application will return
+    the selected passage's original wording.
 
 Return ONLY valid JSON:
 
@@ -279,9 +318,15 @@ SOURCE PASSAGES:
 """
 
         messages = [
-            {"role": "system", "content": system_prompt},
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
             *conversation_history[-4:],
-            {"role": "user", "content": question},
+            {
+                "role": "user",
+                "content": question,
+            },
         ]
 
         start = time.perf_counter()
@@ -297,24 +342,61 @@ SOURCE PASSAGES:
             flush=True,
         )
 
-        # Temporary debug logs
-        print("\n===== RAG DEBUG =====", flush=True)
-        print("Original question:", question, flush=True)
-        print("Retrieval query:", retrieval_query, flush=True)
+        # 6. Temporary debug logs
+
+        print(
+            "\n===== RAG DEBUG =====",
+            flush=True,
+        )
+
+        print(
+            "Original question:",
+            question,
+            flush=True,
+        )
+
+        print(
+            "Retrieval query:",
+            retrieval_query,
+            flush=True,
+        )
 
         for index, document in enumerate(documents):
-            print(f"\nPASSAGE {index}", flush=True)
-            print("Content:", document.get("content"), flush=True)
-            print("Metadata:", document.get("metadata"), flush=True)
 
-        print("\nLLM raw response:", raw_response, flush=True)
-        print("=====================\n", flush=True)
+            print(
+                f"\nPASSAGE {index}",
+                flush=True,
+            )
 
-        # 6. Parse structured response
+            print(
+                "Content:",
+                document.get("content"),
+                flush=True,
+            )
+
+            print(
+                "Metadata:",
+                document.get("metadata"),
+                flush=True,
+            )
+
+        print(
+            "\nLLM raw response:",
+            raw_response,
+            flush=True,
+        )
+
+        print(
+            "=====================\n",
+            flush=True,
+        )
+
+        # 7. Parse structured response
 
         start = time.perf_counter()
 
         try:
+
             cleaned = raw_response.strip()
 
             if cleaned.startswith("```"):
@@ -328,7 +410,9 @@ SOURCE PASSAGES:
             result = json.loads(cleaned)
 
             if not isinstance(result, dict):
-                raise ValueError("Expected JSON object")
+                raise ValueError(
+                    "Expected JSON object"
+                )
 
             answer = result.get("answer", "")
             evidence = result.get("evidence", [])
@@ -338,7 +422,11 @@ SOURCE PASSAGES:
 
             answer = answer.strip()
 
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except (
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+        ):
             return (
                 "I couldn't generate a reliable "
                 "source-based answer for this question."
@@ -357,7 +445,7 @@ SOURCE PASSAGES:
                 "this question."
             )
 
-        # 7. Validate exact supporting quotes
+        # 8. Validate evidence
 
         valid_source_indexes = self._validate_evidence(
             evidence=evidence,
@@ -370,7 +458,30 @@ SOURCE PASSAGES:
                 "Hadith evidence for this answer."
             )
 
-        # 8. Build citations from actual source metadata
+        # 9. Extractive answering for Hadith requests
+
+        if self._is_hadith_request(question):
+
+            source_index = valid_source_indexes[0]
+            source_document = documents[source_index]
+
+            # Return the original retrieved Hadith text
+            # instead of the LLM-generated Hadith wording.
+
+            answer = source_document.get(
+                "content", ""
+            ).strip()
+
+            if not answer:
+                return (
+                    "I couldn't verify the Hadith text "
+                    "from the available sources."
+                )
+
+            # Cite only the selected Hadith
+            valid_source_indexes = [source_index]
+
+        # 10. Build citations from actual source metadata
 
         citations = [
             self._build_citation(documents[index])
