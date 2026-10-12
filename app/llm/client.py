@@ -1,3 +1,4 @@
+
 import time
 import httpx
 
@@ -7,7 +8,7 @@ from app.core.config import settings
 class OllamaClient:
 
     def __init__(self):
-        self.base_url = settings.LLM_BASE_URL
+        self.base_url = settings.LLM_BASE_URL.rstrip("/")
         self.model = settings.LLM_MODEL
 
         self.client = httpx.AsyncClient(
@@ -18,9 +19,21 @@ class OllamaClient:
         self,
         messages: list[dict[str, str]],
         json_mode: bool = False,
+        task: str = "answer",
     ) -> str:
 
         start = time.perf_counter()
+
+        if task == "translation":
+            options = {
+                "num_predict": 100,
+                "temperature": 0.0,
+            }
+        else:
+            options = {
+                "num_predict": 300,
+                "temperature": 0.0,
+            }
 
         payload = {
             "model": self.model,
@@ -28,10 +41,7 @@ class OllamaClient:
             "stream": False,
             "think": False,
             "keep_alive": "30m",
-            "options": {
-                "num_predict": 350,
-                "temperature": 0.1,
-            },
+            "options": options,
         }
 
         if json_mode:
@@ -43,6 +53,7 @@ class OllamaClient:
         )
 
         response.raise_for_status()
+
         data = response.json()
 
         print(
@@ -65,7 +76,19 @@ class OllamaClient:
                     flush=True,
                 )
 
-        return data["message"]["content"]
+        if isinstance(data.get("eval_count"), int):
+            print(
+                "[TIMING] Generated tokens:",
+                data["eval_count"],
+                flush=True,
+            )
+
+        content = data.get("message", {}).get("content", "")
+
+        if not isinstance(content, str):
+            raise ValueError("Invalid Ollama response content")
+
+        return content.strip()
 
     async def close(self):
         await self.client.aclose()
