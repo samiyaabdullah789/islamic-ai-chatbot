@@ -1,5 +1,7 @@
+
 # Virtual environment
 venv/
+.venv/
 
 # Environment variables
 .env
@@ -14,3 +16,16 @@ __pycache__/
 
 # Testing cache
 .pytest_cache/
+
+# JSON source data
+data/**/*.json
+
+# Cleaned and raw JSON folders
+data/raw_json/
+data/cleaned_json/
+
+# ChromaDB local storage
+chroma_data/
+
+# Logs
+*.log

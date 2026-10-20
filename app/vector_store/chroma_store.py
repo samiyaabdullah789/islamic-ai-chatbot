@@ -1,3 +1,4 @@
+
 from app.vector_store.chroma_client import chroma_client
 
 
@@ -30,6 +31,34 @@ class ChromaStore:
             n_results=limit,
             include=["documents", "metadatas", "distances"],
         )
+
+    def get_source_document_ids(
+        self,
+        source_id: int,
+    ) -> list[str]:
+        results = self.collection.get(
+            where={"source_id": source_id},
+            include=[],
+        )
+
+        return results["ids"]
+
+    def delete_source_documents(
+        self,
+        source_id: int,
+    ) -> int:
+        document_ids = self.get_source_document_ids(
+            source_id=source_id,
+        )
+
+        if not document_ids:
+            return 0
+
+        self.collection.delete(
+            ids=document_ids,
+        )
+
+        return len(document_ids)
 
 
 chroma_store = ChromaStore()

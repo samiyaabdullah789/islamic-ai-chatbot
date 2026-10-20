@@ -1,11 +1,24 @@
+
 from datetime import datetime
+from enum import Enum
 
 from pydantic import BaseModel, ConfigDict
+
+
+class SourceStatus(str, Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 class SourceCreate(BaseModel):
     name: str
     file_path: str
+
+
+class SourceStatusUpdate(BaseModel):
+    status: SourceStatus
 
 
 class SourceResponse(BaseModel):

@@ -1,3 +1,4 @@
+
 from sqlalchemy.orm import Session
 
 from app.models.conversation import Conversation
@@ -51,6 +52,31 @@ class ConversationRepository:
             .order_by(Conversation.created_at.desc())
             .all()
         )
+
+    def update_title(
+        self,
+        db: Session,
+        conversation: Conversation,
+        title: str,
+    ) -> Conversation:
+
+        conversation.title = title
+
+        db.add(conversation)
+        db.commit()
+        db.refresh(conversation)
+
+        return conversation
+
+    
+    def delete(
+        self,
+        db: Session,
+        conversation: Conversation,
+    ) -> None:
+        db.delete(conversation)
+        db.commit()
+
 
 
 conversation_repository = ConversationRepository()

@@ -1,6 +1,13 @@
+
 from fastapi import APIRouter
 
-from app.api.routes import health, chat, conversations, sources
+from app.api.routes import (
+    health,
+    chat,
+    conversations,
+    sources,
+    saved_answers,
+)
 
 api_router = APIRouter()
 
@@ -21,4 +28,9 @@ api_router.include_router(
 
 api_router.include_router(
     sources.router,
+)
+
+api_router.include_router(
+    saved_answers.router,
+    tags=["Saved Answers"],
 )
