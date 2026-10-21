@@ -1,4 +1,3 @@
-
 import time
 
 from sqlalchemy.orm import Session
@@ -16,7 +15,7 @@ class ChatService:
         user_id: str,
         message: str,
         conversation_id: int,
-    ) -> str:
+    ) -> dict:
 
         total_start = time.perf_counter()
 
@@ -89,7 +88,7 @@ class ChatService:
         # Save assistant response
         start = time.perf_counter()
 
-        message_repository.create(
+        assistant_message = message_repository.create(
             db=db,
             conversation_id=conversation.id,
             role="assistant",
@@ -106,7 +105,10 @@ class ChatService:
             flush=True,
         )
 
-        return response
+        return {
+            "response": response,
+            "message_id": assistant_message.id,
+        }
 
 
 chat_service = ChatService()

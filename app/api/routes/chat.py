@@ -1,3 +1,4 @@
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
@@ -24,7 +25,7 @@ async def chat(
     # Temporary development user until app authentication is integrated
     user_id = "1"
 
-    response = await chat_service.process_message(
+    result = await chat_service.process_message(
         db=db,
         user_id=user_id,
         message=request.message,
@@ -32,5 +33,6 @@ async def chat(
     )
 
     return ChatResponse(
-        response=response
+        response=result["response"],
+        message_id=result["message_id"],
     )
