@@ -1,0 +1,644 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bot Tester</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --border: #e2e5ea;
+    --text: #1d2330;
+    --muted: #6b7280;
+    --accent: #0f766e;
+    --accent-soft: #e6f4f2;
+    --user: #0f766e;
+    --user-text: #ffffff;
+    --error: #b42318;
+    --error-soft: #fdecea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b;
+      --panel: #1a1e26;
+      --border: #2b313c;
+      --text: #e6e8ec;
+      --muted: #9aa3b2;
+      --accent: #2dd4bf;
+      --accent-soft: #163331;
+      --user: #115e59;
+      --user-text: #ffffff;
+      --error: #f97066;
+      --error-soft: #3a1a18;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+  }
+  button {
+    font: inherit;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 6px 10px;
+  }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+
+  /* Sidebar */
+  aside {
+    width: 280px;
+    flex-shrink: 0;
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+  }
+  .side-head {
+    padding: 14px;
+    display: flex;
+    gap: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .side-head button { flex: 1; }
+  .tabs { display: flex; border-bottom: 1px solid var(--border); }
+  .tabs button {
+    flex: 1;
+    border: 0;
+    border-radius: 0;
+    padding: 10px;
+    color: var(--muted);
+    border-bottom: 2px solid transparent;
+  }
+  .tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .list { flex: 1; overflow-y: auto; padding: 8px; }
+  .item {
+    padding: 8px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .item:hover { background: var(--bg); }
+  .item.active { background: var(--accent-soft); }
+  .item .title {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .item .actions { display: none; gap: 4px; }
+  .item:hover .actions { display: flex; }
+  .item .actions button { padding: 2px 6px; font-size: 12px; }
+  .saved {
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+  .saved .text {
+    max-height: 120px;
+    overflow: hidden;
+    white-space: pre-wrap;
+  }
+  .saved .meta {
+    margin-top: 6px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .empty { color: var(--muted); padding: 12px; font-size: 13px; }
+
+  /* Main */
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  header h1 { font-size: 16px; margin: 0; flex: 1; }
+  header .status { font-size: 12px; color: var(--muted); }
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .msg { max-width: 760px; display: flex; flex-direction: column; gap: 4px; }
+  .msg.user { align-self: flex-end; align-items: flex-end; }
+  .msg.assistant { align-self: flex-start; }
+  .bubble {
+    padding: 10px 14px;
+    border-radius: 12px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    unicode-bidi: plaintext;
+  }
+  .msg.user .bubble { background: var(--user); color: var(--user-text); }
+  .msg.assistant .bubble {
+    background: var(--panel);
+    border: 1px solid var(--border);
+  }
+  .msg .meta {
+    font-size: 12px;
+    color: var(--muted);
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+  .msg .meta button { padding: 1px 8px; font-size: 12px; }
+  .thinking .bubble { color: var(--muted); font-style: italic; }
+  .error-bar {
+    margin: 0 20px 10px;
+    padding: 10px 14px;
+    background: var(--error-soft);
+    color: var(--error);
+    border-radius: 8px;
+    font-size: 13px;
+    display: none;
+  }
+  form {
+    padding: 14px 20px 20px;
+    display: flex;
+    gap: 10px;
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+  }
+  textarea {
+    flex: 1;
+    resize: none;
+    font: inherit;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    min-height: 44px;
+    max-height: 200px;
+    unicode-bidi: plaintext;
+  }
+  textarea:focus { outline: none; border-color: var(--accent); }
+  .placeholder {
+    margin: auto;
+    color: var(--muted);
+    text-align: center;
+  }
+
+  @media (max-width: 720px) {
+    body { flex-direction: column; }
+    aside { width: 100%; max-height: 40vh; border-right: 0; border-bottom: 1px solid var(--border); }
+  }
+</style>
+</head>
+<body>
+
+<aside>
+  <div class="side-head">
+    <button class="primary" id="newChat">+ New chat</button>
+  </div>
+  <div class="tabs">
+    <button class="active" data-tab="chats">Chats</button>
+    <button data-tab="saved">Saved</button>
+  </div>
+  <div class="list" id="chatList"></div>
+  <div class="list" id="savedList" hidden></div>
+</aside>
+
+<main>
+  <header>
+    <h1 id="chatTitle">Bot Tester</h1>
+    <span class="status" id="status"></span>
+  </header>
+  <div id="messages">
+    <div class="placeholder">Pick a chat on the left or click "New chat".</div>
+  </div>
+  <div class="error-bar" id="errorBar"></div>
+  <form id="form">
+    <textarea id="input" rows="1" placeholder="Ask a question..." disabled></textarea>
+    <button class="primary" id="send" disabled>Send</button>
+  </form>
+</main>
+
+<script>
+const API = "/api/v1";
+
+const state = {
+  conversations: [],
+  currentId: null,
+  sending: false,
+  savedByMessage: new Map(),  // message_id -> saved_answer_id
+};
+
+const $ = (id) => document.getElementById(id);
+
+async function api(path, options = {}) {
+  const res = await fetch(API + path, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const body = await res.json();
+      detail = typeof body.detail === "string"
+        ? body.detail
+        : JSON.stringify(body.detail ?? body);
+    } catch {}
+    throw new Error(`${res.status}: ${detail}`);
+  }
+
+  return res.status === 204 ? null : res.json();
+}
+
+function showError(message) {
+  const bar = $("errorBar");
+  bar.textContent = message;
+  bar.style.display = message ? "block" : "none";
+}
+
+function formatTime(iso) {
+  return new Date(iso).toLocaleString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    day: "numeric",
+    month: "short",
+  });
+}
+
+// ---------- Conversations ----------
+
+async function loadConversations() {
+  try {
+    state.conversations = await api("/conversations");
+    renderConversations();
+  } catch (err) {
+    showError("Could not load conversations — " + err.message);
+  }
+}
+
+function renderConversations() {
+  const list = $("chatList");
+  list.innerHTML = "";
+
+  if (state.conversations.length === 0) {
+    list.innerHTML = '<div class="empty">No chats yet. Click "New chat" to start.</div>';
+    return;
+  }
+
+  for (const conv of state.conversations) {
+    const item = document.createElement("div");
+    item.className = "item" + (conv.id === state.currentId ? " active" : "");
+
+    const title = document.createElement("span");
+    title.className = "title";
+    title.textContent = conv.title || `Chat #${conv.id}`;
+
+    const actions = document.createElement("span");
+    actions.className = "actions";
+
+    const rename = document.createElement("button");
+    rename.textContent = "Rename";
+    rename.onclick = (e) => { e.stopPropagation(); renameConversation(conv); };
+
+    const del = document.createElement("button");
+    del.textContent = "Delete";
+    del.onclick = (e) => { e.stopPropagation(); deleteConversation(conv); };
+
+    actions.append(rename, del);
+    item.append(title, actions);
+    item.onclick = () => openConversation(conv.id);
+    list.append(item);
+  }
+}
+
+async function newConversation() {
+  try {
+    const conv = await api("/conversations", {
+      method: "POST",
+      body: JSON.stringify({ title: null }),
+    });
+    state.conversations.unshift(conv);
+    await openConversation(conv.id);
+  } catch (err) {
+    showError("Could not create chat — " + err.message);
+  }
+}
+
+async function renameConversation(conv) {
+  const title = prompt("New title:", conv.title || "");
+  if (title === null || !title.trim()) return;
+
+  try {
+    const updated = await api(`/conversations/${conv.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title }),
+    });
+    Object.assign(conv, updated);
+    renderConversations();
+    if (conv.id === state.currentId) $("chatTitle").textContent = updated.title;
+  } catch (err) {
+    showError("Could not rename chat — " + err.message);
+  }
+}
+
+async function deleteConversation(conv) {
+  if (!confirm(`Delete "${conv.title || "Chat #" + conv.id}"?`)) return;
+
+  try {
+    await api(`/conversations/${conv.id}`, { method: "DELETE" });
+    state.conversations = state.conversations.filter((c) => c.id !== conv.id);
+
+    if (conv.id === state.currentId) {
+      state.currentId = null;
+      $("chatTitle").textContent = "Bot Tester";
+      $("messages").innerHTML =
+        '<div class="placeholder">Pick a chat on the left or click "New chat".</div>';
+      setInputEnabled(false);
+    }
+    renderConversations();
+  } catch (err) {
+    showError("Could not delete chat — " + err.message);
+  }
+}
+
+async function openConversation(id) {
+  state.currentId = id;
+  showError("");
+  renderConversations();
+
+  const conv = state.conversations.find((c) => c.id === id);
+  $("chatTitle").textContent = conv?.title || `Chat #${id}`;
+  $("messages").innerHTML = '<div class="placeholder">Loading...</div>';
+
+  try {
+    const messages = await api(`/conversations/${id}/messages`);
+    const box = $("messages");
+    box.innerHTML = "";
+
+    if (messages.length === 0) {
+      box.innerHTML = '<div class="placeholder">Ask your first question.</div>';
+    }
+    for (const m of messages) addMessage(m.role, m.content, m.id, m.created_at);
+
+    setInputEnabled(true);
+    $("input").focus();
+  } catch (err) {
+    showError("Could not load messages — " + err.message);
+  }
+}
+
+// ---------- Messages ----------
+
+function addMessage(role, content, messageId, createdAt, extraMeta) {
+  const box = $("messages");
+  box.querySelector(".placeholder")?.remove();
+
+  const wrap = document.createElement("div");
+  wrap.className = "msg " + role;
+
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.textContent = content;
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
+
+  if (createdAt) {
+    const time = document.createElement("span");
+    time.textContent = formatTime(createdAt);
+    meta.append(time);
+  }
+  if (extraMeta) {
+    const extra = document.createElement("span");
+    extra.textContent = extraMeta;
+    meta.append(extra);
+  }
+  if (role === "assistant" && messageId) {
+    const copy = document.createElement("button");
+    copy.textContent = "Copy";
+    copy.onclick = async () => {
+      await navigator.clipboard.writeText(content);
+      copy.textContent = "Copied";
+      setTimeout(() => (copy.textContent = "Copy"), 1200);
+    };
+    meta.append(copy, saveButton(messageId));
+  }
+
+  wrap.append(bubble, meta);
+  box.append(wrap);
+  box.scrollTop = box.scrollHeight;
+  return wrap;
+}
+
+function saveButton(messageId) {
+  const btn = document.createElement("button");
+  const refresh = () => {
+    btn.textContent = state.savedByMessage.has(messageId) ? "★ Saved" : "☆ Save";
+  };
+  refresh();
+
+  btn.onclick = async () => {
+    btn.disabled = true;
+    try {
+      const savedId = state.savedByMessage.get(messageId);
+      if (savedId) {
+        await api(`/saved-answers/${savedId}`, { method: "DELETE" });
+        state.savedByMessage.delete(messageId);
+      } else {
+        const saved = await api("/saved-answers", {
+          method: "POST",
+          body: JSON.stringify({ message_id: messageId }),
+        });
+        state.savedByMessage.set(messageId, saved.id);
+      }
+      refresh();
+      loadSaved();
+    } catch (err) {
+      showError("Could not update saved answer — " + err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  return btn;
+}
+
+async function sendMessage() {
+  const input = $("input");
+  const text = input.value.trim();
+  if (!text || state.sending || !state.currentId) return;
+
+  const conversationId = state.currentId;
+  state.sending = true;
+  setInputEnabled(false);
+  showError("");
+  input.value = "";
+  autoGrow();
+
+  addMessage("user", text, null, new Date().toISOString());
+
+  const thinking = addMessage("assistant", "Thinking... 0s");
+  thinking.classList.add("thinking");
+  const started = performance.now();
+  const timer = setInterval(() => {
+    const s = Math.round((performance.now() - started) / 1000);
+    thinking.querySelector(".bubble").textContent = `Thinking... ${s}s`;
+  }, 1000);
+
+  try {
+    const result = await api("/chat", {
+      method: "POST",
+      body: JSON.stringify({ conversation_id: conversationId, message: text }),
+    });
+    const seconds = ((performance.now() - started) / 1000).toFixed(1);
+    thinking.remove();
+
+    if (state.currentId === conversationId) {
+      addMessage(
+        "assistant",
+        result.response,
+        result.message_id,
+        new Date().toISOString(),
+        `${seconds}s`,
+      );
+    }
+  } catch (err) {
+    thinking.remove();
+    showError("Message failed — " + err.message);
+    input.value = text;
+  } finally {
+    clearInterval(timer);
+    state.sending = false;
+    setInputEnabled(state.currentId !== null);
+    input.focus();
+  }
+}
+
+function setInputEnabled(enabled) {
+  $("input").disabled = !enabled;
+  $("send").disabled = !enabled;
+}
+
+function autoGrow() {
+  const input = $("input");
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, 200) + "px";
+}
+
+// ---------- Saved answers ----------
+
+async function loadSaved() {
+  const list = $("savedList");
+  try {
+    const saved = await api("/saved-answers");
+    state.savedByMessage = new Map(saved.map((s) => [s.message_id, s.id]));
+    list.innerHTML = "";
+
+    if (saved.length === 0) {
+      list.innerHTML = '<div class="empty">No saved answers yet.</div>';
+      return;
+    }
+
+    for (const s of saved) {
+      const card = document.createElement("div");
+      card.className = "saved";
+
+      const text = document.createElement("div");
+      text.className = "text";
+      text.textContent = s.answer;
+
+      const meta = document.createElement("div");
+      meta.className = "meta";
+
+      const time = document.createElement("span");
+      time.textContent = formatTime(s.created_at);
+
+      const remove = document.createElement("button");
+      remove.textContent = "Unsave";
+      remove.onclick = async () => {
+        try {
+          await api(`/saved-answers/${s.id}`, { method: "DELETE" });
+          loadSaved();
+          if (state.currentId) openConversation(state.currentId);
+        } catch (err) {
+          showError("Could not unsave answer — " + err.message);
+        }
+      };
+
+      meta.append(time, remove);
+      card.append(text, meta);
+      list.append(card);
+    }
+  } catch (err) {
+    list.innerHTML = "";
+    showError("Could not load saved answers — " + err.message);
+  }
+}
+
+// ---------- Health ----------
+
+async function checkHealth() {
+  try {
+    await api("/health");
+    $("status").textContent = "● API connected";
+  } catch {
+    $("status").textContent = "○ API not reachable";
+  }
+}
+
+// ---------- Wiring ----------
+
+$("newChat").onclick = newConversation;
+
+$("form").onsubmit = (e) => {
+  e.preventDefault();
+  sendMessage();
+};
+
+$("input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+$("input").addEventListener("input", autoGrow);
+
+document.querySelectorAll(".tabs button").forEach((tab) => {
+  tab.onclick = () => {
+    document.querySelectorAll(".tabs button").forEach((t) => t.classList.remove("active"));
+    tab.classList.add("active");
+    const showSaved = tab.dataset.tab === "saved";
+    $("chatList").hidden = showSaved;
+    $("savedList").hidden = !showSaved;
+    if (showSaved) loadSaved();
+  };
+});
+
+checkHealth();
+loadConversations();
+loadSaved();
+</script>
+</body>
+</html>
