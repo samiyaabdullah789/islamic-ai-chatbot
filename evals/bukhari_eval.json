@@ -6,14 +6,14 @@
       "category": "english",
       "type": "answer",
       "question": "What does Islam say about intentions?",
-      "expected_refs": ["1-1-1", "1-2-51", "9-86-85"]
+      "expected_refs": ["1-1-1", "1-2-51", "3-46-706", "5-58-238", "8-78-680", "9-86-85"]
     },
     {
       "id": "pillars-en",
       "category": "english",
       "type": "answer",
       "question": "What are the five pillars of Islam?",
-      "expected_refs": ["1-2-7"]
+      "expected_refs": ["1-2-7", "6-60-40"]
     },
     {
       "id": "brother-en",
@@ -55,7 +55,7 @@
       "category": "english",
       "type": "answer",
       "question": "What should a believer do if he cannot say something good?",
-      "expected_refs": ["8-73-47", "8-73-48", "8-73-157", "8-73-158", "8-76-482", "8-76-483"]
+      "expected_refs": ["8-73-47", "8-73-48", "8-73-157", "8-73-158", "8-73-160", "8-76-482", "8-76-483"]
     },
     {
       "id": "true-muslim-en",
@@ -69,14 +69,14 @@
       "category": "english",
       "type": "answer",
       "question": "What are the biggest sins in Islam?",
-      "expected_refs": ["8-73-7", "8-73-8", "8-74-290", "9-84-54"]
+      "expected_refs": ["8-73-4", "8-73-7", "8-73-8", "8-74-290", "9-84-54"]
     },
     {
       "id": "ramadan-en",
       "category": "english",
       "type": "answer",
       "question": "What is the reward of fasting in Ramadan?",
-      "expected_refs": ["1-2-37", "3-31-120", "3-31-121", "4-54-479"]
+      "expected_refs": ["1-2-37", "3-31-120", "3-31-121", "3-32-231", "4-54-479"]
     },
     {
       "id": "raiyan-en",
@@ -90,21 +90,21 @@
       "category": "english",
       "type": "answer",
       "question": "Should an imam make the prayer long or short?",
-      "expected_refs": ["1-3-90", "1-11-670", "1-11-671", "1-11-672"]
+      "expected_refs": ["1-3-90", "1-11-670", "1-11-671", "1-11-672", "9-89-273"]
     },
     {
       "id": "intentions-text",
       "category": "hadith_text",
       "type": "answer",
       "question": "Show me the hadith about intentions",
-      "expected_refs": ["1-1-1", "1-2-51", "9-86-85"]
+      "expected_refs": ["1-1-1", "1-2-51", "3-46-706", "5-58-238", "8-78-680", "9-86-85"]
     },
     {
       "id": "intentions-ru",
       "category": "roman_urdu",
       "type": "answer",
       "question": "niyat ke baare mein kya hukm hai?",
-      "expected_refs": ["1-1-1", "1-2-51", "9-86-85"]
+      "expected_refs": ["1-1-1", "1-2-51", "3-46-706", "5-58-238", "8-78-680", "9-86-85"]
     },
     {
       "id": "mother-ru",
@@ -132,14 +132,14 @@
       "category": "urdu",
       "type": "answer",
       "question": "اسلام کی بنیاد کتنی چیزوں پر ہے؟",
-      "expected_refs": ["1-2-7"]
+      "expected_refs": ["1-2-7", "6-60-40"]
     },
     {
       "id": "ramadan-ur",
       "category": "urdu",
       "type": "answer",
       "question": "رمضان کے روزوں کا کیا اجر ہے؟",
-      "expected_refs": ["1-2-37", "3-31-120", "3-31-121", "4-54-479"]
+      "expected_refs": ["1-2-37", "3-31-120", "3-31-121", "3-32-231", "4-54-479"]
     },
     {
       "id": "fasting-followup",
@@ -150,7 +150,7 @@
         {"role": "assistant", "content": "Fasting in Ramadan is one of the five principles on which Islam is based."}
       ],
       "question": "What is its reward?",
-      "expected_refs": ["1-2-37", "3-31-120", "3-31-121", "4-54-479"]
+      "expected_refs": ["1-2-37", "3-31-120", "3-31-121", "3-32-231", "4-54-479"]
     },
     {
       "id": "bitcoin",
