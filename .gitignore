@@ -27,5 +27,8 @@ data/cleaned_json/
 # ChromaDB local storage
 chroma_data/
 
+# Eval run outputs
+evals/results/
+
 # Logs
 *.log
