@@ -63,7 +63,7 @@
       "category": "english",
       "type": "answer",
       "question": "Who is a true Muslim according to the Prophet?",
-      "expected_refs": ["1-2-9", "8-76-491"]
+      "expected_refs": ["1-2-9", "1-2-10", "8-76-491"]
     },
     {
       "id": "great-sins-en",
@@ -77,7 +77,7 @@
       "category": "english",
       "type": "answer",
       "question": "What is the reward of fasting in Ramadan?",
-      "expected_refs": ["1-2-37", "3-31-120", "3-31-121", "3-32-231", "4-54-479"]
+      "expected_refs": ["1-2-37", "3-31-120", "3-31-121", "3-31-125", "3-32-231", "4-54-479"]
     },
     {
       "id": "raiyan-en",
@@ -140,7 +140,7 @@
       "category": "urdu",
       "type": "answer",
       "question": "رمضان کے روزوں کا کیا اجر ہے؟",
-      "expected_refs": ["1-2-37", "3-31-120", "3-31-121", "3-32-231", "4-54-479"]
+      "expected_refs": ["1-2-37", "3-31-120", "3-31-121", "3-31-125", "3-32-231", "4-54-479"]
     },
     {
       "id": "fasting-followup",
@@ -151,7 +151,7 @@
         {"role": "assistant", "content": "Fasting in Ramadan is one of the five principles on which Islam is based."}
       ],
       "question": "What is its reward?",
-      "expected_refs": ["1-2-37", "3-31-120", "3-31-121", "3-32-231", "4-54-479"]
+      "expected_refs": ["1-2-37", "3-31-120", "3-31-121", "3-31-125", "3-32-231", "4-54-479"]
     },
     {
       "id": "bitcoin",

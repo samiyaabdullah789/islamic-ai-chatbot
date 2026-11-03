@@ -44,6 +44,12 @@ class RAGPipeline:
 
         text = unicodedata.normalize("NFKC", text)
 
+        # Rejoin words split by PDF line-break hyphens,
+        # e.g. "re -\nward" or "un - dutiful". A hyphen
+        # followed by whitespace is never part of a real
+        # compound such as "so-and-so".
+        text = re.sub(r"(?<=\w)\s*-\s+(?=\w)", "", text)
+
         return " ".join(
             re.findall(r"[^\W_]+", text.casefold())
         )
@@ -505,6 +511,43 @@ class RAGPipeline:
 
         return passages
 
+    def _expand_short_quote(
+        self,
+        normalized_quote,
+        source_text,
+    ):
+        # Short replies such as "Your mother." are exact but too
+        # short to verify. Widen them to the enclosing source
+        # sentence(s) so the quote stays verbatim from the source.
+        if not normalized_quote:
+            return None
+
+        sentences = re.split(
+            r'(?<=[.!?"])\s+',
+            str(source_text),
+        )
+
+        for position, sentence in enumerate(sentences):
+            if normalized_quote not in self._normalize_text(sentence):
+                continue
+
+            start = position
+            text = sentence
+
+            while (
+                len(self._normalize_text(text).split()) < 5
+                and start > 0
+            ):
+                start -= 1
+                text = sentences[start] + " " + text
+
+            if len(self._normalize_text(text).split()) >= 5:
+                return text.strip()
+
+            return None
+
+        return None
+
     def _validate_evidence(
         self,
         evidence,
@@ -546,11 +589,28 @@ class RAGPipeline:
             )
 
             if len(normalized_quote.split()) < 5:
+                expanded = self._expand_short_quote(
+                    normalized_quote,
+                    passage["source_answer"],
+                )
+
+                if expanded is None:
+                    print(
+                        f"[RAG EVIDENCE] Quote too short: {index}",
+                        flush=True,
+                    )
+                    continue
+
                 print(
-                    f"[RAG EVIDENCE] Quote too short: {index}",
+                    f"[RAG EVIDENCE] Short quote expanded "
+                    f"from source: {index}",
                     flush=True,
                 )
-                continue
+
+                quote = expanded
+                normalized_quote = self._normalize_text(
+                    expanded
+                )
 
             if normalized_quote not in normalized_answer:
                 print(
@@ -989,6 +1049,26 @@ class RAGPipeline:
             )
             return self.INVALID_MESSAGE
 
+        if hadith_request:
+            first_index = (
+                verified_evidence[0]["source_index"]
+            )
+
+            answer = str(
+                documents[first_index].get(
+                    "content", ""
+                )
+            ).strip()
+
+            # The reply is the full source text, so the verifier
+            # must see the full passage rather than a short quote.
+            verified_evidence = [
+                {
+                    **verified_evidence[0],
+                    "quote": answer,
+                }
+            ]
+
         supported = await self._verify_answer(
             question=retrieval_query,
             answer=answer,
@@ -1002,21 +1082,6 @@ class RAGPipeline:
                 flush=True,
             )
             return self.INVALID_MESSAGE
-
-        if hadith_request:
-            first_index = (
-                verified_evidence[0]["source_index"]
-            )
-
-            answer = str(
-                documents[first_index].get(
-                    "content", ""
-                )
-            ).strip()
-
-            verified_evidence = (
-                verified_evidence[:1]
-            )
 
         citations = list(
             dict.fromkeys(
