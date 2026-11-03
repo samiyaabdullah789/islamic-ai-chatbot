@@ -34,7 +34,7 @@
       "category": "english",
       "type": "answer",
       "question": "What advice did the Prophet give about anger?",
-      "expected_refs": ["8-73-137", "8-73-135"]
+      "expected_refs": ["8-73-137", "8-73-135", "4-54-502", "8-73-74"]
     },
     {
       "id": "strong-en",
@@ -118,7 +118,7 @@
       "category": "roman_urdu",
       "type": "answer",
       "question": "gussa ke baare mein Nabi ne kya naseehat ki?",
-      "expected_refs": ["8-73-137", "8-73-135"]
+      "expected_refs": ["8-73-137", "8-73-135", "4-54-502", "8-73-74"]
     },
     {
       "id": "truth-ru",
