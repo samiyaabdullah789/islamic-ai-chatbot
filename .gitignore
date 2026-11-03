@@ -32,3 +32,6 @@ evals/results/
 
 # Logs
 *.log
+
+# ChromaDB Vector Database
+chroma_data/

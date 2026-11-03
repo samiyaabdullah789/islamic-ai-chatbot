@@ -1,3 +1,4 @@
+
 import time
 
 from sqlalchemy.orm import Session
@@ -15,11 +16,14 @@ class ChatService:
         user_id: str,
         message: str,
         conversation_id: int,
+        madhhab: str | None = None,
     ) -> dict:
 
         total_start = time.perf_counter()
 
-        # Check that conversation exists and belongs to current user
+        # -----------------------------------
+        # 1. Verify conversation
+        # -----------------------------------
         start = time.perf_counter()
 
         conversation = conversation_repository.get_by_id_and_user(
@@ -29,14 +33,17 @@ class ChatService:
         )
 
         print(
-            f"[TIMING] Conversation check: {time.perf_counter() - start:.2f}s",
+            f"[TIMING] Conversation check: "
+            f"{time.perf_counter() - start:.2f}s",
             flush=True,
         )
 
         if conversation is None:
             raise ValueError("Conversation not found")
 
-        # Get previous conversation history
+        # -----------------------------------
+        # 2. Fetch previous messages
+        # -----------------------------------
         start = time.perf_counter()
 
         previous_messages = message_repository.get_all_by_conversation(
@@ -53,11 +60,14 @@ class ChatService:
         ]
 
         print(
-            f"[TIMING] Conversation history: {time.perf_counter() - start:.2f}s",
+            f"[TIMING] Conversation history: "
+            f"{time.perf_counter() - start:.2f}s",
             flush=True,
         )
 
-        # Save current user message
+        # -----------------------------------
+        # 3. Save user message
+        # -----------------------------------
         start = time.perf_counter()
 
         message_repository.create(
@@ -68,24 +78,37 @@ class ChatService:
         )
 
         print(
-            f"[TIMING] Save user message: {time.perf_counter() - start:.2f}s",
+            f"[TIMING] Save user message: "
+            f"{time.perf_counter() - start:.2f}s",
             flush=True,
         )
 
-        # Generate answer using RAG + conversation context
+        # -----------------------------------
+        # 4. Generate RAG answer
+        # -----------------------------------
         start = time.perf_counter()
+
+        print(
+            f"[CHAT] Selected Madhhab: "
+            f"{madhhab or 'General'}",
+            flush=True,
+        )
 
         response = await rag_pipeline.generate(
             question=message,
             conversation_history=conversation_history,
+            madhhab=madhhab,
         )
 
         print(
-            f"[TIMING] RAG + LLM total: {time.perf_counter() - start:.2f}s",
+            f"[TIMING] RAG + LLM total: "
+            f"{time.perf_counter() - start:.2f}s",
             flush=True,
         )
 
-        # Save assistant response
+        # -----------------------------------
+        # 5. Save assistant response
+        # -----------------------------------
         start = time.perf_counter()
 
         assistant_message = message_repository.create(
@@ -96,12 +119,17 @@ class ChatService:
         )
 
         print(
-            f"[TIMING] Save assistant message: {time.perf_counter() - start:.2f}s",
+            f"[TIMING] Save assistant message: "
+            f"{time.perf_counter() - start:.2f}s",
             flush=True,
         )
 
+        # -----------------------------------
+        # 6. Request timing
+        # -----------------------------------
         print(
-            f"[TIMING] COMPLETE CHAT REQUEST: {time.perf_counter() - total_start:.2f}s",
+            f"[TIMING] COMPLETE CHAT REQUEST: "
+            f"{time.perf_counter() - total_start:.2f}s",
             flush=True,
         )
 

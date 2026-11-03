@@ -25,17 +25,28 @@ class ChromaStore:
         self,
         query_embedding: list[float],
         limit: int = 5,
+        where: dict | None = None,
     ):
-        return self.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=limit,
-            include=["documents", "metadatas", "distances"],
-        )
+        query_args = {
+            "query_embeddings": [query_embedding],
+            "n_results": limit,
+            "include": [
+                "documents",
+                "metadatas",
+                "distances",
+            ],
+        }
+
+        if where is not None:
+            query_args["where"] = where
+
+        return self.collection.query(**query_args)
 
     def get_source_document_ids(
         self,
         source_id: int,
     ) -> list[str]:
+
         results = self.collection.get(
             where={"source_id": source_id},
             include=[],
@@ -47,6 +58,7 @@ class ChromaStore:
         self,
         source_id: int,
     ) -> int:
+
         document_ids = self.get_source_document_ids(
             source_id=source_id,
         )

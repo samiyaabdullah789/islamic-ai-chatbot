@@ -1,3 +1,4 @@
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,6 +9,9 @@ class Settings(BaseSettings):
 
     LLM_BASE_URL: str
     LLM_MODEL: str
+
+    # Ollama context window (project-specific)
+    OLLAMA_NUM_CTX: int = 8192
 
     # Embedding model
     EMBEDDING_MODEL: str = "nomic-embed-text"

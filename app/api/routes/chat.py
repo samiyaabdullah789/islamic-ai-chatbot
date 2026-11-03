@@ -9,6 +9,7 @@ from app.db.session import get_db
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.services.chat_service import chat_service
 
+
 router = APIRouter()
 
 
@@ -30,6 +31,7 @@ async def chat(
         user_id=user_id,
         message=request.message,
         conversation_id=request.conversation_id,
+        madhhab=request.madhhab,
     )
 
     return ChatResponse(

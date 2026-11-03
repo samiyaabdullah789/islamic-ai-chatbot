@@ -1,3 +1,4 @@
+
 import chromadb
 from pathlib import Path
 
@@ -11,8 +12,14 @@ class ChromaClient:
             path=str(CHROMA_PATH)
         )
 
+        # Existing collection: preserve all old RAG data
         self.collection = self.client.get_or_create_collection(
             name="islamic_knowledge"
+        )
+
+        # New collection: question-based Q&A retrieval
+        self.qa_collection = self.client.get_or_create_collection(
+            name="islamic_qa_questions"
         )
 
 
