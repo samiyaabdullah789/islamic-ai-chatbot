@@ -253,6 +253,54 @@ class RAGPipeline:
             )
         )
 
+    @staticmethod
+    def _detect_language(question):
+        if re.search(r"[؀-ۿ]", question):
+            return "urdu"
+
+        words = set(
+            re.findall(r"[a-z]+", question.casefold())
+        )
+
+        markers = {
+            "kya", "kia", "kyun", "kion",
+            "kaise", "kaisa", "kaisi",
+            "kese", "kesy", "kis",
+            "mein", "mai", "hain", "hai",
+            "hota", "hoti", "hote",
+            "chahiye", "chahye",
+            "karna", "karni", "karo",
+            "sath", "saath",
+            "walidain", "waliden",
+            "maa", "baap",
+            "namaz", "roza",
+            "gunah", "sawab",
+            "batao", "btao",
+            "mujhe", "mje",
+            "apne", "apni",
+            "unka", "unki",
+            "unke", "hum",
+            "aur", "se", "ke", "ko", "ki", "ka",
+        }
+
+        strong = {
+            "kya", "kia", "kyun", "kion",
+            "kaise", "kaisa", "kaisi",
+            "kese", "kesy", "mein",
+            "hain", "hota", "hoti",
+            "chahiye", "chahye",
+            "walidain", "waliden",
+            "mujhe", "mje",
+            "batao", "btao",
+        }
+
+        matches = words & markers
+
+        if matches & strong or len(matches) >= 3:
+            return "roman_urdu"
+
+        return "english"
+
     async def _build_retrieval_query(
         self,
         question,
@@ -260,43 +308,81 @@ class RAGPipeline:
     ):
         question = question.strip()
 
-        if not self._needs_context(
+        needs_context = self._needs_context(
             question,
             conversation_history,
-        ):
+        )
+
+        language = self._detect_language(question)
+
+        print(
+            f"[LANGUAGE] Detected: {language}",
+            flush=True,
+        )
+
+        # Sources are English, so non-English questions are
+        # translated even when they need no history.
+        if not needs_context and language == "english":
             print(
-                "[RAG] Standalone question: "
-                "Skipping follow-up rewriting",
+                "[RAG] Standalone English question: "
+                "Skipping query rewriting",
                 flush=True,
             )
             return question
 
-        history_text = "\n".join(
-            f"{item.get('role', 'user')}: "
-            f"{str(item.get('content', ''))[:300]}"
-            for item in conversation_history[-4:]
-        )
+        if needs_context:
+            history_text = "\n".join(
+                f"{item.get('role', 'user')}: "
+                f"{str(item.get('content', ''))[:300]}"
+                for item in conversation_history[-4:]
+            )
+        else:
+            history_text = "None"
 
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "Rewrite the user's follow-up as "
-                    "one standalone English search query. "
-                    "Use history only to resolve references. "
-                    "Do not answer the question. "
-                    "Do not invent religious rulings. "
-                    "Output only the query."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Conversation history:\n{history_text}\n\n"
-                    f"Current question: {question}"
-                ),
-            },
-        ]
+        if language == "english":
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Rewrite the user's follow-up as "
+                        "one standalone English search query. "
+                        "Use history only to resolve references. "
+                        "Do not answer the question. "
+                        "Do not invent religious rulings. "
+                        "Output only the query."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Conversation history:\n{history_text}\n\n"
+                        f"Current question: {question}"
+                    ),
+                },
+            ]
+        else:
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Convert the user's question into ONE "
+                        "short English search query for an "
+                        "English Islamic source database. "
+                        "Use conversation context only to "
+                        "resolve unclear references. "
+                        "Preserve meaning and Islamic terminology. "
+                        "Do not answer or add facts. "
+                        "Output only the English query."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Context: {history_text}\n"
+                        f"Question: {question}"
+                    ),
+                },
+            ]
 
         start = time.perf_counter()
 
