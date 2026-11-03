@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import io
 import json
+import os
 import re
 import time
 from datetime import datetime
@@ -32,9 +33,12 @@ CITATION_PATTERN = re.compile(
 )
 
 FALLBACKS = {
-    rag_pipeline._fallback("missing"),
-    rag_pipeline._fallback("invalid"),
+    rag_pipeline.MISSING_MESSAGE,
+    rag_pipeline.INVALID_MESSAGE,
 }
+
+# Number of reranked passages the pipeline sends to the LLM
+CONTEXT_SIZE = rag_pipeline.MAX_PASSAGES
 
 
 def document_ref(document: dict) -> str:
@@ -53,19 +57,21 @@ async def check_retrieval(case: dict) -> dict:
     question = case["question"]
     history = case.get("history", [])
 
-    language = rag_pipeline._detect_language(question)
-
     query = await rag_pipeline._build_retrieval_query(
         question,
         history,
-        language,
     )
 
-    retrieved = await rag_retriever.retrieve(query, limit=10)
-    reranked = await rag_reranker.rerank(query, retrieved, limit=5)
+    retrieved = await rag_retriever.retrieve(
+        query,
+        limit=rag_pipeline.RETRIEVAL_LIMIT,
+        general_question=rag_retriever.is_clearly_general_question(query),
+    )
+    reranked = await rag_reranker.rerank(query, retrieved, limit=len(retrieved))
 
     retrieved_refs = [document_ref(d) for d in retrieved]
-    top3_refs = [document_ref(d) for d in reranked[:3]]
+    reranked_refs = [document_ref(d) for d in reranked]
+    context_refs = reranked_refs[:CONTEXT_SIZE]
 
     expected = set(case.get("expected_refs", []))
 
@@ -78,14 +84,25 @@ async def check_retrieval(case: dict) -> dict:
         None,
     )
 
+    rerank_scores = {
+        document_ref(d): round(d["rerank_score"], 3)
+        for d in reranked
+        if "rerank_score" in d
+    }
+
     return {
-        "language": language,
         "query": query,
         "retrieved_refs": retrieved_refs,
-        "top3_refs": top3_refs,
-        "hit_at_10": rank is not None,
-        "rank_at_10": rank,
-        "hit_at_top3": bool(expected & set(top3_refs)),
+        "context_refs": context_refs,
+        "context_scores": [rerank_scores.get(ref) for ref in context_refs],
+        "expected_scores": {
+            ref: rerank_scores.get(ref)
+            for ref in retrieved_refs
+            if ref in expected
+        },
+        "retrieved": rank is not None,
+        "retrieved_rank": rank,
+        "in_context": bool(expected & set(context_refs)),
     }
 
 
@@ -106,11 +123,7 @@ async def run_case(case: dict, verbose: bool) -> dict:
                 conversation_history=case.get("history", []),
             )
 
-            retrieval = (
-                await check_retrieval(case)
-                if case["type"] == "answer"
-                else None
-            )
+            retrieval = await check_retrieval(case)
 
     except Exception as exc:
         return {
@@ -170,13 +183,19 @@ def print_result(result: dict) -> None:
 
     if result["type"] == "answer":
         retrieval = result["retrieval"]
-        rank = retrieval["rank_at_10"]
+        rank = retrieval["retrieved_rank"]
 
         line += (
             f"  cited={','.join(result['cited_refs']) or '-'}"
-            f"  top3={'yes' if retrieval['hit_at_top3'] else 'no'}"
-            f"  rank@10={rank or '-'}"
+            f"  in_context={'yes' if retrieval['in_context'] else 'no'}"
+            f"  retrieved_rank={rank or '-'}"
         )
+
+    else:
+        best = result["retrieval"]["context_scores"][:1]
+
+        if best and best[0] is not None:
+            line += f"  best_rerank_score={best[0]}"
 
     print(line)
 
@@ -184,7 +203,14 @@ def print_result(result: dict) -> None:
         print(f"             answer: {result['answer'][:160]!r}")
 
         if result["retrieval"]:
-            print(f"             query:  {result['retrieval']['query']!r}")
+            retrieval = result["retrieval"]
+            print(f"             query:  {retrieval['query']!r}")
+
+            if any(score is not None for score in retrieval["context_scores"]):
+                print(
+                    f"             context: {list(zip(retrieval['context_refs'], retrieval['context_scores']))}"
+                    f"  expected: {retrieval['expected_scores']}"
+                )
 
 
 def print_summary(results: list[dict]) -> None:
@@ -212,12 +238,12 @@ def print_summary(results: list[dict]) -> None:
         pct(count(refuse_cases, lambda r: r["status"] == "PASS"), len(refuse_cases)),
     )
     print(
-        "Expected hadith in top 3:  ",
-        pct(count(retrieval_ok, lambda r: r["retrieval"]["hit_at_top3"]), len(retrieval_ok)),
+        f"Expected hadith sent to LLM (top {CONTEXT_SIZE}):",
+        pct(count(retrieval_ok, lambda r: r["retrieval"]["in_context"]), len(retrieval_ok)),
     )
     print(
-        "Expected hadith in top 10: ",
-        pct(count(retrieval_ok, lambda r: r["retrieval"]["hit_at_10"]), len(retrieval_ok)),
+        "Expected hadith retrieved:          ",
+        pct(count(retrieval_ok, lambda r: r["retrieval"]["retrieved"]), len(retrieval_ok)),
     )
 
     categories = sorted({r["category"] for r in results})
@@ -244,7 +270,12 @@ async def main() -> None:
     parser.add_argument("--verbose", action="store_true", help="Show pipeline debug output")
     args = parser.parse_args()
 
-    cases = json.loads(EVAL_FILE.read_text(encoding="utf-8"))["cases"]
+    eval_set = json.loads(EVAL_FILE.read_text(encoding="utf-8"))
+    cases = eval_set["cases"]
+
+    # The retriever reads RAG_TEST_SOURCE_ID on every call; pin it to
+    # the source this test set was written for.
+    os.environ["RAG_TEST_SOURCE_ID"] = str(eval_set["source_id"])
 
     if args.only:
         cases = [case for case in cases if case["id"] in args.only]

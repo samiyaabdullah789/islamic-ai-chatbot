@@ -1,12 +1,13 @@
 {
   "description": "Regression test set for the Sahih al-Bukhari RAG pipeline. Refs use 'volume-book-number' and were verified against data/sources/pdfs/sahih_bukhari.pdf. Any one matching ref counts as correct.",
+  "source_id": 1,
   "cases": [
     {
       "id": "intentions-en",
       "category": "english",
       "type": "answer",
       "question": "What does Islam say about intentions?",
-      "expected_refs": ["1-1-1", "1-2-51", "3-46-706", "5-58-238", "8-78-680", "9-86-85"]
+      "expected_refs": ["1-1-1", "1-2-51", "3-46-706", "5-58-238", "7-62-8", "8-78-680", "9-86-85"]
     },
     {
       "id": "pillars-en",
@@ -69,7 +70,7 @@
       "category": "english",
       "type": "answer",
       "question": "What are the biggest sins in Islam?",
-      "expected_refs": ["8-73-4", "8-73-7", "8-73-8", "8-74-290", "9-84-54"]
+      "expected_refs": ["8-73-4", "8-73-7", "8-73-8", "8-74-290", "9-84-54", "9-84-55"]
     },
     {
       "id": "ramadan-en",
@@ -97,14 +98,14 @@
       "category": "hadith_text",
       "type": "answer",
       "question": "Show me the hadith about intentions",
-      "expected_refs": ["1-1-1", "1-2-51", "3-46-706", "5-58-238", "8-78-680", "9-86-85"]
+      "expected_refs": ["1-1-1", "1-2-51", "3-46-706", "5-58-238", "7-62-8", "8-78-680", "9-86-85"]
     },
     {
       "id": "intentions-ru",
       "category": "roman_urdu",
       "type": "answer",
       "question": "niyat ke baare mein kya hukm hai?",
-      "expected_refs": ["1-1-1", "1-2-51", "3-46-706", "5-58-238", "8-78-680", "9-86-85"]
+      "expected_refs": ["1-1-1", "1-2-51", "3-46-706", "5-58-238", "7-62-8", "8-78-680", "9-86-85"]
     },
     {
       "id": "mother-ru",

@@ -16,6 +16,13 @@ class Settings(BaseSettings):
     # Embedding model
     EMBEDDING_MODEL: str = "nomic-embed-text"
 
+    # Reranker: "keyword" or "cross_encoder"
+    RERANKER: str = "keyword"
+    RERANKER_MODEL: str = "BAAI/bge-reranker-v2-m3"
+    RERANKER_DEVICE: str | None = None
+    # Passages scoring below this are treated as not relevant
+    RERANK_MIN_SCORE: float = 0.0
+
     DATABASE_URL: str
 
     JWT_SECRET_KEY: str

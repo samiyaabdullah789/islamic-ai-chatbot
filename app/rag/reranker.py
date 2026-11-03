@@ -1,8 +1,12 @@
 
+import asyncio
 import math
 import re
+import threading
 import time
 import unicodedata
+
+from app.core.config import settings
 
 
 class RAGReranker:
@@ -495,4 +499,107 @@ class RAGReranker:
         return selected
 
 
-rag_reranker = RAGReranker()
+class CrossEncoderReranker:
+    """
+    Scores each (question, passage) pair with a cross-encoder model.
+    Scores are 0-1; passages below RERANK_MIN_SCORE are dropped so
+    the LLM never sees passages that do not address the question.
+    """
+
+    def __init__(self):
+        self._model = None
+        self._lock = threading.Lock()
+
+    def _load_model(self):
+        # Imported lazily: torch is heavy and only needed for this reranker.
+        with self._lock:
+            if self._model is None:
+                from sentence_transformers import CrossEncoder
+
+                self._model = CrossEncoder(
+                    settings.RERANKER_MODEL,
+                    max_length=512,
+                    device=settings.RERANKER_DEVICE,
+                )
+
+        return self._model
+
+    def _score(
+        self,
+        question: str,
+        documents: list[dict],
+    ) -> list[float]:
+
+        model = self._load_model()
+
+        pairs = [
+            (question, str(document.get("content", "")))
+            for document in documents
+        ]
+
+        return [
+            float(score)
+            for score in model.predict(pairs)
+        ]
+
+    async def rerank(
+        self,
+        question: str,
+        documents: list[dict],
+        limit: int = 5,
+    ) -> list[dict]:
+
+        start = time.perf_counter()
+
+        if not documents or limit <= 0:
+            return []
+
+        scores = await asyncio.to_thread(
+            self._score,
+            question,
+            documents,
+        )
+
+        scored = sorted(
+            (
+                {**document, "rerank_score": score}
+                for document, score in zip(documents, scores)
+                if score >= settings.RERANK_MIN_SCORE
+            ),
+            key=lambda document: document["rerank_score"],
+            reverse=True,
+        )
+
+        selected = scored[:limit]
+
+        for index, document in enumerate(
+            selected,
+            start=1,
+        ):
+            metadata = (
+                document.get("metadata") or {}
+            )
+
+            print(
+                f"[RERANK] Selected {index}: "
+                f"source={metadata.get('source_name', 'Unknown')} | "
+                f"madhhab={metadata.get('madhhab', 'N/A')} | "
+                f"score={document['rerank_score']:.4f} | "
+                f"id={document.get('id')}",
+                flush=True,
+            )
+
+        print(
+            "[TIMING] Reranker total: "
+            f"{time.perf_counter() - start:.2f}s",
+            flush=True,
+        )
+
+        return selected
+
+
+rag_reranker = (
+    CrossEncoderReranker()
+    if settings.RERANKER == "cross_encoder"
+    else RAGReranker()
+)
