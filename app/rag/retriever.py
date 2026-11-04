@@ -10,14 +10,12 @@ from app.vector_store.chroma_store import chroma_store
 
 
 class RAGRetriever:
-
     MIN_CANDIDATES_BEFORE_FALLBACK = 5
 
     QUERY_FILLER_WORDS = {
         "give", "me", "one", "some", "please",
-        "tell", "show", "share", "what",
-        "the", "a", "an", "about",
-        "islam", "islamic",
+        "tell", "show", "share", "what", "the",
+        "a", "an", "about", "islam", "islamic",
     }
 
     GENERAL_TOPICS = (
@@ -42,68 +40,70 @@ class RAGRetriever:
 
     @staticmethod
     def _normalize(text: str) -> str:
-        text = unicodedata.normalize(
-            "NFKC", str(text)
-        )
+        text = unicodedata.normalize("NFKC", str(text))
         return " ".join(text.strip().split())
 
     @classmethod
-    def is_clearly_general_question(
-        cls,
-        question: str,
-    ) -> bool:
-
-        normalized = cls._normalize(
-            question
-        ).casefold()
+    def is_clearly_general_question(cls, question: str) -> bool:
+        normalized = cls._normalize(question).casefold()
 
         return any(
             re.search(pattern, normalized)
             for pattern in (
-                cls.GENERAL_TOPICS
-                + cls.GENERAL_FACT_PATTERNS
+                cls.GENERAL_TOPICS + cls.GENERAL_FACT_PATTERNS
             )
         )
 
-    def build_search_queries(
-        self,
-        query: str,
-    ) -> list[str]:
+    @staticmethod
+    def _focused_query(query: str) -> str:
+        focused = re.split(
+            r"\b(?:answer according to|"
+            r"according to the available|"
+            r"provide (?:the )?(?:citations?|references?|sources?)|"
+            r"cite (?:the )?sources?)\b",
+            query,
+            maxsplit=1,
+            flags=re.I,
+        )[0].strip(" \t\n.!?")
 
+        return focused or query.strip()
+
+    def build_search_queries(self, query: str) -> list[str]:
         original = self._normalize(query)
 
         if not original:
             return []
 
-        words = re.findall(
-            r"\b\w+\b",
-            original,
+        focused = self._focused_query(original)
+
+        words = re.findall(r"\b\w+\b", focused)
+
+        filler = self.QUERY_FILLER_WORDS | {
+            "answer", "according", "available",
+            "hadith", "hadiths", "sahih", "bukhari",
+            "listening", "listen", "is", "are",
+            "in", "to", "of", "whether",
+            "can", "do", "does",
+        }
+
+        topic = " ".join(
+            word for word in words
+            if word.casefold() not in filler
         )
 
-        simplified = " ".join(
-            word
-            for word in words
-            if word.casefold()
-            not in self.QUERY_FILLER_WORDS
-        ).strip()
-
-        queries = [original]
+        queries = [focused]
 
         if (
-            simplified
-            and len(simplified) >= 5
-            and simplified.casefold()
-            != original.casefold()
+            topic
+            and len(topic) >= 4
+            and topic.casefold() != focused.casefold()
         ):
-            queries.append(simplified)
+            queries.append(topic)
 
         return queries
 
     @staticmethod
-    def _valid_distance(
-        distance: object,
-    ) -> float:
-
+    def _valid_distance(distance: object) -> float:
         if (
             isinstance(distance, (int, float))
             and not isinstance(distance, bool)
@@ -118,30 +118,15 @@ class RAGRetriever:
         results: dict,
         query_index: int,
     ) -> list[dict]:
-
-        ids = results.get(
-            "ids", [[]]
-        )[0]
-
-        contents = results.get(
-            "documents", [[]]
-        )[0]
-
-        metadatas = results.get(
-            "metadatas", [[]]
-        )[0]
-
-        distances = results.get(
-            "distances", [[]]
-        )[0]
+        ids = results.get("ids", [[]])[0]
+        contents = results.get("documents", [[]])[0]
+        metadatas = results.get("metadatas", [[]])[0]
+        distances = results.get("distances", [[]])[0]
 
         documents = []
 
         for doc_id, content, metadata, distance in zip(
-            ids,
-            contents,
-            metadatas,
-            distances,
+            ids, contents, metadatas, distances
         ):
             if not str(content or "").strip():
                 continue
@@ -150,11 +135,7 @@ class RAGRetriever:
                 "id": str(doc_id),
                 "content": str(content),
                 "metadata": metadata or {},
-                "distance": (
-                    RAGRetriever._valid_distance(
-                        distance
-                    )
-                ),
+                "distance": self_distance(distance),
                 "query_index": query_index,
             })
 
@@ -165,27 +146,19 @@ class RAGRetriever:
         documents_by_id: dict[str, dict],
         new_documents: list[dict],
     ) -> None:
-
         for document in new_documents:
             doc_id = document["id"]
-
-            previous = documents_by_id.get(
-                doc_id
-            )
+            previous = documents_by_id.get(doc_id)
 
             if (
                 previous is None
-                or document["distance"]
-                < previous["distance"]
+                or document["distance"] < previous["distance"]
             ):
                 documents_by_id[doc_id] = document
 
     @staticmethod
     def _get_test_source_id() -> int | None:
-
-        value = os.getenv(
-            "RAG_TEST_SOURCE_ID", ""
-        ).strip()
+        value = os.getenv("RAG_TEST_SOURCE_ID", "").strip()
 
         if not value:
             return None
@@ -205,21 +178,13 @@ class RAGRetriever:
         madhhab: str | None,
         general_question: bool,
     ) -> dict | None:
-
         conditions = []
 
         if source_id is not None:
-            conditions.append({
-                "source_id": source_id
-            })
+            conditions.append({"source_id": source_id})
 
-        if (
-            madhhab is not None
-            and not general_question
-        ):
-            conditions.append({
-                "madhhab": madhhab
-            })
+        if madhhab is not None and not general_question:
+            conditions.append({"madhhab": madhhab})
 
         if not conditions:
             return None
@@ -227,9 +192,7 @@ class RAGRetriever:
         if len(conditions) == 1:
             return conditions[0]
 
-        return {
-            "$and": conditions
-        }
+        return {"$and": conditions}
 
     async def retrieve(
         self,
@@ -238,27 +201,22 @@ class RAGRetriever:
         madhhab: str | None = None,
         general_question: bool = False,
     ) -> list[dict]:
-
         total_start = time.perf_counter()
 
         if limit <= 0:
             return []
 
-        queries = self.build_search_queries(
-            query
-        )
+        queries = self.build_search_queries(query)
 
         if not queries:
             return []
 
-        test_source_id = (
-            self._get_test_source_id()
-        )
+        test_source_id = self._get_test_source_id()
 
         where_filter = self._build_filter(
-            source_id=test_source_id,
-            madhhab=madhhab,
-            general_question=general_question,
+            test_source_id,
+            madhhab,
+            general_question,
         )
 
         print(
@@ -268,26 +226,21 @@ class RAGRetriever:
         )
 
         print(
-            f"[RAG] Selected Madhhab: "
-            f"{madhhab or 'General'}",
+            f"[RAG] Selected Madhhab: {madhhab or 'General'}",
             flush=True,
         )
 
         print(
-            f"[RAG] ChromaDB filter: "
-            f"{where_filter}",
+            f"[RAG] ChromaDB filter: {where_filter}",
             flush=True,
         )
 
         documents_by_id = {}
 
-        # Run original and simplified queries.
-        for query_index, search_query in enumerate(
-            queries
-        ):
+        for query_index, search_query in enumerate(queries):
             print(
-                f"[RAG] Search query "
-                f"{query_index + 1}: {search_query}",
+                f"[RAG] Search query {query_index + 1}: "
+                f"{search_query}",
                 flush=True,
             )
 
@@ -303,8 +256,7 @@ class RAGRetriever:
                 )
 
             print(
-                f"[TIMING] Query "
-                f"{query_index + 1} embedding: "
+                f"[TIMING] Query {query_index + 1} embedding: "
                 f"{time.perf_counter() - start:.2f}s",
                 flush=True,
             )
@@ -328,35 +280,28 @@ class RAGRetriever:
             )
 
             print(
-                f"[TIMING] Query "
-                f"{query_index + 1} ChromaDB search: "
+                f"[TIMING] Query {query_index + 1} ChromaDB search: "
                 f"{time.perf_counter() - start:.2f}s",
                 flush=True,
             )
 
             print(
-                f"[RAG] Query "
-                f"{query_index + 1} candidates: "
+                f"[RAG] Query {query_index + 1} candidates: "
                 f"{len(documents)}",
                 flush=True,
             )
 
         documents = sorted(
             documents_by_id.values(),
-            key=lambda document: (
-                document["distance"]
-            ),
+            key=lambda document: document["distance"],
         )
 
-        # Preserve isolated source testing.
         if test_source_id is not None:
             documents = [
                 document
                 for document in documents
                 if str(
-                    document["metadata"].get(
-                        "source_id"
-                    )
+                    document["metadata"].get("source_id")
                 ) == str(test_source_id)
             ]
 
@@ -382,12 +327,16 @@ class RAGRetriever:
             )
 
         print(
-            "[TIMING] Retriever total: "
+            f"[TIMING] Retriever total: "
             f"{time.perf_counter() - total_start:.2f}s",
             flush=True,
         )
 
         return documents
+
+
+def self_distance(distance: object) -> float:
+    return RAGRetriever._valid_distance(distance)
 
 
 rag_retriever = RAGRetriever()
