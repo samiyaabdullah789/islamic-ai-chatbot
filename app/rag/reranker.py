@@ -560,6 +560,53 @@ class CrossEncoderReranker:
             documents,
         )
 
+        # -----------------------------------------
+        # DEBUG: Show scores for ALL candidates
+        # before applying the minimum threshold.
+        # This does not change reranking behavior.
+        # -----------------------------------------
+
+        print(
+            "\n[RERANK DEBUG] All candidate scores:",
+            flush=True,
+        )
+
+        for document, score in sorted(
+            zip(documents, scores),
+            key=lambda item: item[1],
+            reverse=True,
+        ):
+            print(
+                f"[RERANK DEBUG] "
+                f"score={score:.4f} | "
+                f"id={document.get('id')} | "
+                f"text={str(document.get('content', ''))[:100]}",
+                flush=True,
+            )
+
+        print(
+            f"[RERANK DEBUG] Minimum threshold: "
+            f"{settings.RERANK_MIN_SCORE}",
+            flush=True,
+        )
+
+        print(
+            f"[RERANK DEBUG] Total candidates: "
+            f"{len(documents)}",
+            flush=True,
+        )
+
+        print(
+            f"[RERANK DEBUG] Candidates above threshold: "
+            f"{sum(score >= settings.RERANK_MIN_SCORE for score in scores)}",
+            flush=True,
+        )
+
+        # -----------------------------------------
+        # ORIGINAL RERANKING LOGIC
+        # No changes to scoring or filtering.
+        # -----------------------------------------
+
         scored = sorted(
             (
                 {**document, "rerank_score": score}
