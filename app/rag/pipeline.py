@@ -1387,14 +1387,26 @@ class RAGPipeline:
                 self.INVALID_MESSAGE,
             )
 
-        if len(kept_claims) / generated_count < self.MIN_KEPT_RATIO:
-            print(
-                f"[RAG] Only {len(kept_claims)} of "
-                f"{generated_count} generated claims survived",
-                flush=True,
-            )
+        # Quote mismatches were already excluded by _validate_claims.
+        # Measure verifier agreement among claims with verified source
+        # quotes, rather than penalizing the answer a second time for
+        # claims that were never sent to the verifier.
+        valid_quote_count = len(verified_claims)
+        supported_count = len(kept_claims)
+        supported_ratio = supported_count / valid_quote_count
+
+        print(
+            f"[RAG] Validation summary: "
+            f"generated={generated_count} | "
+            f"valid_quotes={valid_quote_count} | "
+            f"supported={supported_count} | "
+            f"support_ratio={supported_ratio:.2f}",
+            flush=True,
+        )
+
+        if supported_ratio < self.MIN_KEPT_RATIO:
             return self._refuse(
-                "too many claims failed validation",
+                "too many quote-valid claims failed evidence verification",
                 self.INVALID_MESSAGE,
             )
 
