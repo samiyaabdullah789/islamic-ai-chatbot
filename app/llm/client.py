@@ -1,4 +1,5 @@
 
+import re
 import time
 
 import httpx
@@ -14,7 +15,11 @@ class OllamaClient:
             "temperature": 0.0,
         },
         "answer": {
-            "num_predict": 650,
+            "num_predict": 1200,
+            "temperature": 0.0,
+        },
+        "verify": {
+            "num_predict": 500,
             "temperature": 0.0,
         },
         "translation": {
@@ -140,6 +145,22 @@ class OllamaClient:
                 flush=True,
             )
 
+        done_reason = data.get("done_reason")
+
+        if done_reason:
+            print(
+                f"[OLLAMA] Done reason: {done_reason}",
+                flush=True,
+            )
+
+        if done_reason == "length":
+            print(
+                f"[WARNING] Generation for task '{task}' "
+                "stopped at the num_predict limit. "
+                "JSON output may be truncated.",
+                flush=True,
+            )
+
         message = data.get("message")
 
         if not isinstance(message, dict):
@@ -153,6 +174,13 @@ class OllamaClient:
             raise ValueError(
                 "Invalid Ollama response content"
             )
+
+        content = re.sub(
+            r"<think>.*?</think>",
+            "",
+            content,
+            flags=re.S | re.I,
+        )
 
         return content.strip()
 

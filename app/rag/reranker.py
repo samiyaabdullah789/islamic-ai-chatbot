@@ -84,6 +84,9 @@ class RAGReranker:
         "source", "sources", "should", "could",
         "would", "may", "must", "according",
         "provide", "explain", "please",
+        "if", "he", "she", "they", "them",
+        "cannot", "something", "someone",
+        "anything", "anyone",
     }
 
     SUBJECT_GROUPS = (
@@ -92,9 +95,7 @@ class RAGReranker:
             "instruments", "sing", "singing",
             "singer", "singers", "song", "songs",
         },
-        {
-            "zakat", "zakah", "alms",
-        },
+        {"zakat", "zakah", "alms"},
         {
             "prayer", "prayers", "pray",
             "praying", "salah", "salat", "namaz",
@@ -103,17 +104,12 @@ class RAGReranker:
             "fast", "fasts", "fasting",
             "sawm", "siyam", "roza", "rozay",
         },
-        {
-            "wudu", "wudhu", "wuzu", "ablution",
-        },
-        {
-            "ghusl", "ritual", "bath",
-        },
-        {
-            "marriage", "nikah", "nikkah",
-        },
+        {"wudu", "wudhu", "wuzu", "ablution"},
+        {"ghusl", "ritual", "bath"},
+        {"marriage", "nikah", "nikkah"},
     )
 
+    # Heuristic-only ranking uses its original score scale.
     TOPIC_WEIGHT = 3.0
     NO_TOPIC_PENALTY = 1.0
 
@@ -629,8 +625,10 @@ class CrossEncoderReranker:
     CROSS_ENCODER_WEIGHT = 1.0
     HEURISTIC_WEIGHT = 1.0
 
-    TOPIC_WEIGHT = 3.0
-    NO_TOPIC_PENALTY = 1.0
+    # Small topic adjustments relative to fusion scores.
+    # These are tuning values, not evaluation-specific rules.
+    TOPIC_WEIGHT = 0.012
+    NO_TOPIC_PENALTY = 0.006
 
     def __init__(self):
         self._model = None
@@ -829,7 +827,6 @@ class CrossEncoderReranker:
             )
 
             topic_score = topic_scores[index]
-
             final_score = fusion_score
 
             if has_topic_matches:
