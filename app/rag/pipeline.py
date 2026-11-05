@@ -705,7 +705,7 @@ class RAGPipeline:
                 )
                 continue
 
-            key = (index, self._normalize_text(text))
+            key = self._normalize_text(text)
 
             if key in seen:
                 continue
@@ -830,14 +830,20 @@ class RAGPipeline:
             "9. When unsure whether the passage states the "
             "claim, mark it \"unsupported\".\n\n"
             "ALSO decide \"answers_question\": true only if the "
-            "supported claims, taken together, directly address "
+            "supported and relevant claims, taken together, directly address "
             "the user's exact question. A passage about a "
             "different event, a different subject, or only a "
             "related topic does not answer it.\n\n"
+            "For EACH claim also return relevant: true ONLY when "
+            "that individual claim directly helps answer the USER "
+            "QUESTION. A claim can be supported but irrelevant. "
+            "Do not count unrelated prayer, travel, or other "
+            "subject matter merely because a shared word appears. "
+            "When unsure, set relevant to false.\n\n"
             "Keep each reason under 15 words.\n"
             "Return JSON only, in this exact shape:\n"
             '{"claims":[{"id":1,"verdict":"supported",'
-            '"reason":"..."}],"answers_question":true}\n'
+            '"reason":"...","relevant":true}],"answers_question":true}\n'
             "Valid verdicts: supported, unsupported, contradicted."
         )
 
@@ -927,10 +933,18 @@ class RAGPipeline:
                 )
                 return None
 
-            verdicts[raw_id] = verdict
+            relevant = entry.get("relevant")
+            if type(relevant) is not bool:
+                print(
+                    f"[RAG VERIFY] Missing relevance for claim {raw_id}",
+                    flush=True,
+                )
+                return None
+
+            verdicts[raw_id] = (verdict, relevant)
 
             print(
-                f"[RAG VERIFY] Claim {raw_id}: {verdict} | "
+                f"[RAG VERIFY] Claim {raw_id}: {verdict} | relevant={relevant} | "
                 f"{str(entry.get('reason', ''))[:200]}",
                 flush=True,
             )
@@ -948,7 +962,7 @@ class RAGPipeline:
         valid_verdicts = {
             "supported", "unsupported", "contradicted"
         }
-        if any(value not in valid_verdicts for value in verdicts.values()):
+        if any(value[0] not in valid_verdicts for value in verdicts.values()):
             print(
                 "[RAG VERIFY] Unknown verdict in response",
                 flush=True,
@@ -956,18 +970,18 @@ class RAGPipeline:
             return None
 
         contradicted = any(
-            verdict == "contradicted"
+            verdict[0] == "contradicted"
             for verdict in verdicts.values()
         )
 
         kept = [
             claim
             for number, claim in enumerate(claims, start=1)
-            if verdicts.get(number) == "supported"
+            if verdicts.get(number) == ("supported", True)
         ]
 
-        # The model is instructed to judge relevance using only
-        # supported claims. Never treat unsupported claims as an answer.
+        # Only individually supported AND question-relevant claims survive.
+        # The overall answers_question flag is an additional safety check.
         answers_question = (
             bool(kept)
             and result.get("answers_question") is True
@@ -1011,7 +1025,8 @@ class RAGPipeline:
         return (
             "You are an Islamic AI Assistant that answers "
             "questions strictly from supplied source passages.\n"
-            "Respond in English only.\n\n"
+            "Generate evidence claims in English for verification. "
+            "The verified final answer may be translated later.\n\n"
 
             "KNOWLEDGE SOURCE RULES:\n"
             "1. Your ONLY permitted factual source is "
@@ -1100,6 +1115,46 @@ class RAGPipeline:
             f"AVAILABLE PASSAGES:\n{source_context}"
         )
 
+    async def _translate_verified_answer(self, answer, language):
+        """Translate only after evidence checks; never translate citations."""
+        if language == "english":
+            return answer
+
+        target = "Roman Urdu (Latin letters only)" if language == "roman_urdu" else "Urdu (Urdu script)"
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"Translate the provided text into {target}. "
+                    "Do not answer the question again. Preserve every factual "
+                    "claim, degree of obligation, negation, name, and qualifier. "
+                    "Do not add or remove information. Keep the same number "
+                    "of sentences and their order. Return only translated text."
+                ),
+            },
+            {"role": "user", "content": answer},
+        ]
+        start = time.perf_counter()
+        try:
+            translated = await ollama_client.generate(messages, task="answer")
+            translated = re.sub(
+                r"<think>.*?</think>", "", str(translated), flags=re.S | re.I
+            ).strip()
+            print(
+                f"[TIMING] Answer translation: {time.perf_counter() - start:.2f}s",
+                flush=True,
+            )
+            if not translated or len(translated) > max(300, len(answer) * 4):
+                print("[LANGUAGE] Translation unusable; keeping verified English", flush=True)
+                return answer
+            if language == "roman_urdu" and re.search(r"[؀-ۿ]", translated):
+                print("[LANGUAGE] Roman Urdu script mismatch; keeping English", flush=True)
+                return answer
+            return translated
+        except Exception as error:
+            print(f"[LANGUAGE] Translation failed: {error}", flush=True)
+            return answer
+
     async def generate(
         self,
         question: str,
@@ -1109,6 +1164,7 @@ class RAGPipeline:
 
         pipeline_start = time.perf_counter()
         question = question.strip()
+        response_language = self._detect_language(question)
 
         if not question:
             return self.MISSING_MESSAGE
@@ -1420,6 +1476,11 @@ class RAGPipeline:
                     "assembled answer incomplete",
                     self.INVALID_MESSAGE,
                 )
+
+        # Translate only the verified answer, never the evidence or citations.
+        # Translation is an LLM step, so multilingual wording still needs testing.
+        if not hadith_request:
+            answer = await self._translate_verified_answer(answer, response_language)
 
         citations = list(
             dict.fromkeys(
