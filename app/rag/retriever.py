@@ -46,6 +46,38 @@ class RAGRetriever:
         return queries
 
     @staticmethod
+    def is_clearly_general_question(query: str) -> bool:
+        """Conservative general-knowledge classification.
+
+        Uncertain questions stay school-specific when a school is selected.
+        A General selection is handled without a school filter in _build_filter.
+        """
+        normalized = " ".join(
+            re.findall(r"[^\W_]+", unicodedata.normalize("NFKC", str(query)).casefold())
+        )
+        if not normalized:
+            return False
+
+        # Avoid treating jurisprudential questions as school-neutral.
+        fiqh_terms = {
+            "permissible", "allowed", "forbidden", "haram", "halal",
+            "obligatory", "mandatory", "required", "wajib", "fard",
+            "farz", "sunnah", "mustahabb", "valid", "invalid",
+            "ruling", "fatwa", "madhhab", "hanafi", "shafi", "maliki",
+            "hanbali", "break", "invalidate", "conditions", "method",
+        }
+        if set(normalized.split()) & fiqh_terms:
+            return False
+
+        general_patterns = (
+            r"\b(?:five|5) pillars of islam\b",
+            r"\b(?:six|6) pillars of (?:iman|faith)\b",
+            r"\b(?:who|what) (?:was|were|is|are) (?:the )?prophet\b",
+            r"\b(?:who|what) (?:was|were|is|are) (?:the )?messenger\b",
+        )
+        return any(re.search(pattern, normalized) for pattern in general_patterns)
+
+    @staticmethod
     def _valid_distance(distance: object) -> float:
         if (
             isinstance(distance, (int, float))
@@ -113,7 +145,7 @@ class RAGRetriever:
         conditions = []
         if source_id is not None:
             conditions.append({"source_id": source_id})
-        if madhhab and not general_question:
+        if madhhab and madhhab.casefold() != "general" and not general_question:
             conditions.append({"madhhab": madhhab})
         if not conditions:
             return None
