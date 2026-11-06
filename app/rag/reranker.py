@@ -627,8 +627,8 @@ class CrossEncoderReranker:
 
     # Small topic adjustments relative to fusion scores.
     # These are tuning values, not evaluation-specific rules.
-    TOPIC_WEIGHT = 0.012
-    NO_TOPIC_PENALTY = 0.006
+    TOPIC_WEIGHT = 0.0
+    NO_TOPIC_PENALTY = 0.0
 
     def __init__(self):
         self._model = None
