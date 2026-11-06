@@ -1001,6 +1001,109 @@ class RAGPipeline:
             "answers_question": answers_question,
         }
 
+    async def _audit_answer_relevance(self, question, claims, passages):
+        """Independent, comparative check of answer relevance.
+
+        The initial verifier only sees cited passages. This audit also
+        sees competing retrieved evidence, making unrelated-but-true
+        quotations easier to detect. Fail closed on invalid output.
+        """
+        if not claims or not passages:
+            return False
+
+        evidence_blocks = []
+        for passage in passages:
+            answer = str(passage["source_answer"])[:self.VERIFIER_PASSAGE_CHARS]
+            source_question = str(passage["source_question"])[:350]
+            evidence_blocks.append(
+                f"PASSAGE {passage['source_index']}\n"
+                f"Source question: {source_question or '(none)'}\n"
+                f"Source answer: {answer}"
+            )
+
+        claim_blocks = []
+        for i, claim in enumerate(claims, 1):
+            claim_blocks.append(
+                f"CLAIM {i} (PASSAGE {claim['source_index']})\n"
+                f"Claim: {claim['text']}\n"
+                f"Exact source quote: {claim['quote']}"
+            )
+
+        system = (
+            "You are an independent relevance auditor. Do NOT answer the "
+            "question or use outside knowledge. Decide whether EACH claim "
+            "directly answers the user's precise question, not merely "
+            "whether it is a true quotation from a source. Compare the "
+            "cited passage with ALL available passages. A claim about a "
+            "different event, person, reward, or subject is NOT an answer "
+            "even if it shares keywords with the question. Distinguish "
+            "what the question asks from what a source actually says. "
+            "For each claim, return relevant=true only if its cited source "
+            "directly supports an answer to the question. When uncertain, "
+            "return false. Do not prefer a passage merely because it is "
+            "first in the list. Return JSON only in this form: "
+            '{"claims":[{"id":1,"relevant":true}],"answers_question":true}'
+        )
+        user = (
+            f"EXACT USER QUESTION:\n{question}\n\n"
+            f"ALL RETRIEVED PASSAGES:\n{chr(10).join(evidence_blocks)}\n\n"
+            f"PROPOSED CLAIMS:\n{chr(10).join(claim_blocks)}\n\n"
+            "Audit the relevance of each claim independently. "
+            "answers_question must be true only if the relevant claims "
+            "collectively give a direct answer."
+        )
+        start = time.perf_counter()
+        try:
+            raw = await ollama_client.generate(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                json_mode=True,
+                task="verify",
+            )
+            result = self._parse_json(raw)
+        except (ValueError, TypeError, KeyError) as error:
+            print(f"[RAG AUDIT] Invalid relevance output: {error}", flush=True)
+            return False
+
+        print(
+            f"[TIMING] Independent relevance audit: "
+            f"{time.perf_counter() - start:.2f}s",
+            flush=True,
+        )
+
+        entries = result.get("claims")
+        if not isinstance(entries, list) or len(entries) != len(claims):
+            print("[RAG AUDIT] Missing or extra claim results", flush=True)
+            return False
+
+        verdicts = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                return False
+            identifier = entry.get("id")
+            if type(identifier) is not int or identifier in verdicts:
+                return False
+            if type(entry.get("relevant")) is not bool:
+                return False
+            verdicts[identifier] = entry["relevant"]
+
+        expected = set(range(1, len(claims) + 1))
+        if set(verdicts) != expected:
+            return False
+
+        print(
+            f"[RAG AUDIT] Claim relevance: {verdicts} | "
+            f"answers_question={result.get('answers_question')}",
+            flush=True,
+        )
+        # Do not silently return an unverified subset of the answer.
+        return (
+            result.get("answers_question") is True
+            and all(verdicts.values())
+        )
+
     @staticmethod
     def _assemble_answer(claims):
         sentences = []
@@ -1463,6 +1566,19 @@ class RAGPipeline:
         if supported_ratio < self.MIN_KEPT_RATIO:
             return self._refuse(
                 "too many quote-valid claims failed evidence verification",
+                self.INVALID_MESSAGE,
+            )
+
+        # A second, comparative relevance check sees every retrieved
+        # passage, not only the passages cited by the answer.
+        audit_passed = await self._audit_answer_relevance(
+            question=retrieval_query,
+            claims=kept_claims,
+            passages=passages,
+        )
+        if not audit_passed:
+            return self._refuse(
+                "independent relevance audit rejected the answer",
                 self.INVALID_MESSAGE,
             )
 
