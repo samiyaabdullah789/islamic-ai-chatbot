@@ -1120,57 +1120,49 @@ class RAGPipeline:
         ))
 
     async def _select_relevant_passages(self, question, passages):
-        """Select the best *direct answer*, not every keyword-related text.
+        """Compare candidates twice to reduce position bias.
 
-        One small-model comparison call is used. For a single-answer
-        question, only the primary passage is sent to generation. For an
-        explicit list/comparison, independently relevant supporting passages
-        may be included. Original source indexes are preserved.
+        Disagreement fails closed. Original source indexes are preserved.
         """
-        if len(passages) <= 1:
+        if not passages:
+            return []
+        if len(passages) == 1:
             return passages
 
-        blocks = []
-        for passage in passages:
-            blocks.append(
-                f"PASSAGE {passage['source_index']}\n"
-                f"Source question: {passage['source_question'] or '(none)'}\n"
-                f"Source answer: {passage['source_answer'][:self.VERIFIER_PASSAGE_CHARS]}"
-            )
-
         multi = self._question_needs_multiple_sources(question)
-        system = (
-            "You are selecting evidence for a source-grounded Islamic QA system. "
-            "Use ONLY the supplied passages. Do not answer from memory. "
-            "First determine what information or action the question asks for. "
-            "Then compare the actual meaning of EVERY passage. "
-            "Choose ONE primary passage that MOST DIRECTLY gives that answer. "
-            "Prefer a passage that states a general teaching when the question "
-            "asks for a general teaching; do not substitute a reward or outcome "
-            "specific to a named historical event. "
-            "For advice about what someone should DO, prefer the passage "
-            "that states the requested action, not another passage containing "
-            "a similar conditional phrase. "
-            "Exact keyword matches alone do not establish relevance. "
-            "Do not prefer the first passage merely because of its position. "
-            "If no passage directly answers the question, use primary_index=null. "
-            "For each candidate you consider relevant, identify the precise "
-            "short answer it supplies, then decide which best answers the question. "
-            "Return ONLY JSON with fields: primary_index (integer or null), "
-            "supporting_indexes (list of integers). "
-            "Supporting passages must each independently answer a distinct "
-            "part of the question. Never include merely related examples. "
-            "For a single-answer question, supporting_indexes must be []. "
-            "Do not output explanations or extra text."
-        )
-        user = (
-            f"EXACT QUESTION:\n{question}\n\n"
-            f"QUESTION NEEDS MULTIPLE DISTINCT ANSWERS: {'yes' if multi else 'no'}\n\n"
-            f"CANDIDATE PASSAGES:\n{chr(10).join(blocks)}\n\n"
-            'Return JSON, e.g. {"primary_index":2,"supporting_indexes":[]}.'
-        )
-        start = time.perf_counter()
-        try:
+        valid_indexes = {p["source_index"] for p in passages}
+
+        async def compare(candidates, attempt):
+            blocks = []
+            for passage in candidates:
+                blocks.append(
+                    f"PASSAGE {passage['source_index']}\n"
+                    f"Source question: {passage['source_question'] or '(none)'}\n"
+                    f"Source answer: {passage['source_answer'][:self.VERIFIER_PASSAGE_CHARS]}"
+                )
+
+            system = (
+                "You select evidence for an Islamic question-answering system. "
+                "Use only the supplied passages, not outside knowledge. "
+                "Identify what the exact question asks, then compare the actual "
+                "meaning of every passage. Choose the passage that DIRECTLY "
+                "answers it. Shared words and similar sentence structures are "
+                "not enough. Do not confuse a historical event-specific reward "
+                "with a general reward, or a related action with the action "
+                "requested. Do not prefer the first passage because of its "
+                "position. If none directly answers, choose null. Supporting "
+                "passages must independently answer distinct requested parts. "
+                "Return only JSON with primary_index (integer or null) and "
+                "supporting_indexes (list of integers). For a single-answer "
+                "question, supporting_indexes must be empty."
+            )
+            candidate_text = "\n\n".join(blocks)
+            user = (
+                f"EXACT QUESTION:\n{question}\n\n"
+                f"MULTIPLE DISTINCT ANSWERS REQUESTED: {'yes' if multi else 'no'}\n\n"
+                f"CANDIDATES:\n{candidate_text}\n\n"
+                "Return the PASSAGE number, not its position in the list."
+            )
             raw = await ollama_client.generate(
                 [
                     {"role": "system", "content": system},
@@ -1182,17 +1174,29 @@ class RAGPipeline:
             result = self._parse_json(raw)
             primary = result.get("primary_index")
             supporting = result.get("supporting_indexes")
-            valid = {item["source_index"] for item in passages}
-            if primary is not None and (type(primary) is not int or primary not in valid):
-                raise ValueError("Invalid primary evidence index")
-            if (
-                not isinstance(supporting, list)
-                or any(type(i) is not int or i not in valid for i in supporting)
-                or len(supporting) != len(set(supporting))
+            if primary is not None and (
+                type(primary) is not int or primary not in valid_indexes
             ):
+                raise ValueError("Invalid primary evidence index")
+            if not isinstance(supporting, list) or any(
+                type(i) is not int or i not in valid_indexes
+                for i in supporting
+            ) or len(supporting) != len(set(supporting)):
                 raise ValueError("Invalid supporting evidence indexes")
-            if primary is not None and primary in supporting:
-                supporting = [i for i in supporting if i != primary]
+            supporting = [i for i in supporting if i != primary]
+            print(
+                f"[RAG SELECT] Attempt {attempt}: primary={primary} | "
+                f"supporting={supporting}",
+                flush=True,
+            )
+            return primary, supporting
+
+        start = time.perf_counter()
+        try:
+            first_primary, first_supporting = await compare(passages, 1)
+            second_primary, second_supporting = await compare(
+                list(reversed(passages)), 2
+            )
         except (ValueError, TypeError, KeyError) as error:
             print(f"[RAG SELECT] Selection failed: {error}", flush=True)
             return []
@@ -1201,16 +1205,23 @@ class RAGPipeline:
             f"[TIMING] Evidence selection: {time.perf_counter() - start:.2f}s",
             flush=True,
         )
-        print(
-            f"[RAG SELECT] Primary passage: {primary} | "
-            f"supporting: {supporting if multi else []}",
-            flush=True,
-        )
-        if primary is None:
+        if first_primary != second_primary:
+            print(
+                f"[RAG SELECT] DISAGREEMENT: {first_primary} vs "
+                f"{second_primary}. Rejecting uncertain evidence.",
+                flush=True,
+            )
             return []
-        chosen = [primary] + (supporting if multi else [])
-        passage_map = {item["source_index"]: item for item in passages}
-        return [passage_map[index] for index in chosen]
+        if first_primary is None:
+            return []
+
+        chosen = [first_primary]
+        if multi:
+            agreed = set(first_supporting) & set(second_supporting)
+            chosen.extend(i for i in first_supporting if i in agreed)
+        passage_map = {p["source_index"]: p for p in passages}
+        print(f"[RAG SELECT] Agreed evidence indexes: {chosen}", flush=True)
+        return [passage_map[i] for i in chosen]
 
     @staticmethod
     def _assemble_answer(claims):
@@ -1605,6 +1616,24 @@ class RAGPipeline:
             len(raw_claims),
             self.MAX_CLAIMS,
         )
+
+        # The model sometimes calls the only selected passage index 0,
+        # even when its original source index is different. Only remap
+        # this unambiguous single-passage case. Quotes are still checked.
+        if len(passages) == 1:
+            actual_index = passages[0]["source_index"]
+            if actual_index != 0:
+                for claim in raw_claims:
+                    if (
+                        isinstance(claim, dict)
+                        and type(claim.get("source_index")) is int
+                        and claim["source_index"] == 0
+                    ):
+                        print(
+                            f"[RAG INDEX] Remapping passage 0 to {actual_index}",
+                            flush=True,
+                        )
+                        claim["source_index"] = actual_index
 
         verified_claims = self._validate_claims(
             raw_claims,
