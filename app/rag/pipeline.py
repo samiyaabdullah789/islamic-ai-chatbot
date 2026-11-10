@@ -1104,13 +1104,28 @@ class RAGPipeline:
             and all(verdicts.values())
         )
 
-    async def _select_relevant_passages(self, question, passages):
-        """Compare evidence against the exact question before generation.
+    @staticmethod
+    def _question_needs_multiple_sources(question):
+        """Detect explicit requests for a collection or comparison.
 
-        The reranker supplies candidates, not proof that each candidate
-        answers the question. A separate, constrained selection task makes
-        the answer model explicitly consider the competing source contexts.
-        No passage is accepted as relevant based on keyword overlap alone.
+        Ordinary single-answer questions use one primary source to avoid
+        combining an on-topic answer with a merely related anecdote.
+        """
+        q = " ".join(str(question).casefold().split())
+        return bool(re.search(
+            r"\b(?:list|enumerate|compare|differences|similarities|"
+            r"several|multiple|various|examples|all the|both|"
+            r"how many|what are the|which are the)\b",
+            q,
+        ))
+
+    async def _select_relevant_passages(self, question, passages):
+        """Select the best *direct answer*, not every keyword-related text.
+
+        One small-model comparison call is used. For a single-answer
+        question, only the primary passage is sent to generation. For an
+        explicit list/comparison, independently relevant supporting passages
+        may be included. Original source indexes are preserved.
         """
         if len(passages) <= 1:
             return passages
@@ -1123,24 +1138,36 @@ class RAGPipeline:
                 f"Source answer: {passage['source_answer'][:self.VERIFIER_PASSAGE_CHARS]}"
             )
 
+        multi = self._question_needs_multiple_sources(question)
         system = (
-            "You select evidence for an Islamic question-answering system. "
-            "Use only the supplied passages, not outside knowledge. "
-            "For EACH passage, decide whether its source answer directly "
-            "addresses the user's exact question. A passage can truthfully "
-            "mention the same words but answer a different question, "
-            "describe a particular historical incident, or discuss an "
-            "unrelated reward. Such a passage must be excluded from a "
-            "general answer unless it directly establishes that answer. "
-            "Compare all passages; do not automatically select the first. "
-            "Include multiple passages when they contribute distinct, "
-            "directly relevant evidence. If uncertain, exclude the passage. "
-            "Return only JSON: {\"relevant_indexes\":[0,2]}. "
-            "Use the actual passage indexes. An empty list is allowed."
+            "You are selecting evidence for a source-grounded Islamic QA system. "
+            "Use ONLY the supplied passages. Do not answer from memory. "
+            "First determine what information or action the question asks for. "
+            "Then compare the actual meaning of EVERY passage. "
+            "Choose ONE primary passage that MOST DIRECTLY gives that answer. "
+            "Prefer a passage that states a general teaching when the question "
+            "asks for a general teaching; do not substitute a reward or outcome "
+            "specific to a named historical event. "
+            "For advice about what someone should DO, prefer the passage "
+            "that states the requested action, not another passage containing "
+            "a similar conditional phrase. "
+            "Exact keyword matches alone do not establish relevance. "
+            "Do not prefer the first passage merely because of its position. "
+            "If no passage directly answers the question, use primary_index=null. "
+            "For each candidate you consider relevant, identify the precise "
+            "short answer it supplies, then decide which best answers the question. "
+            "Return ONLY JSON with fields: primary_index (integer or null), "
+            "supporting_indexes (list of integers). "
+            "Supporting passages must each independently answer a distinct "
+            "part of the question. Never include merely related examples. "
+            "For a single-answer question, supporting_indexes must be []. "
+            "Do not output explanations or extra text."
         )
         user = (
             f"EXACT QUESTION:\n{question}\n\n"
-            f"CANDIDATE PASSAGES:\n{chr(10).join(blocks)}"
+            f"QUESTION NEEDS MULTIPLE DISTINCT ANSWERS: {'yes' if multi else 'no'}\n\n"
+            f"CANDIDATE PASSAGES:\n{chr(10).join(blocks)}\n\n"
+            'Return JSON, e.g. {"primary_index":2,"supporting_indexes":[]}.'
         )
         start = time.perf_counter()
         try:
@@ -1153,26 +1180,37 @@ class RAGPipeline:
                 task="verify",
             )
             result = self._parse_json(raw)
-            indexes = result.get("relevant_indexes")
+            primary = result.get("primary_index")
+            supporting = result.get("supporting_indexes")
             valid = {item["source_index"] for item in passages}
+            if primary is not None and (type(primary) is not int or primary not in valid):
+                raise ValueError("Invalid primary evidence index")
             if (
-                not isinstance(indexes, list)
-                or any(type(index) is not int or index not in valid for index in indexes)
-                or len(indexes) != len(set(indexes))
+                not isinstance(supporting, list)
+                or any(type(i) is not int or i not in valid for i in supporting)
+                or len(supporting) != len(set(supporting))
             ):
-                raise ValueError("Invalid evidence selection indexes")
+                raise ValueError("Invalid supporting evidence indexes")
+            if primary is not None and primary in supporting:
+                supporting = [i for i in supporting if i != primary]
         except (ValueError, TypeError, KeyError) as error:
             print(f"[RAG SELECT] Selection failed: {error}", flush=True)
-            # Fail closed rather than reverting to unfiltered evidence.
             return []
 
         print(
             f"[TIMING] Evidence selection: {time.perf_counter() - start:.2f}s",
             flush=True,
         )
-        print(f"[RAG SELECT] Relevant passage indexes: {indexes}", flush=True)
-        selected = set(indexes)
-        return [item for item in passages if item["source_index"] in selected]
+        print(
+            f"[RAG SELECT] Primary passage: {primary} | "
+            f"supporting: {supporting if multi else []}",
+            flush=True,
+        )
+        if primary is None:
+            return []
+        chosen = [primary] + (supporting if multi else [])
+        passage_map = {item["source_index"]: item for item in passages}
+        return [passage_map[index] for index in chosen]
 
     @staticmethod
     def _assemble_answer(claims):
@@ -1242,12 +1280,15 @@ class RAGPipeline:
             "B. Every claim must cite one passage with "
             "source_index and a quote. Different claims may "
             "cite different passages.\n"
-            "C. Passage order is NOT relevance. Prefer the "
-            "passages whose source question and answer directly "
+            "C. The first AVAILABLE PASSAGE is the selected primary "
+            "evidence for this question. For a single-answer question, "
+            "answer from that primary passage only. For an explicit "
+            "multi-part question, additional passages may support distinct "
+            "parts. Prefer passages whose source question and answer directly "
             "address the user's exact question. Ignore passages "
             "that only share a word or concern a different "
             "subject or event.\n"
-            "D. Cover every distinct point in the passages that "
+            "D. Cover every distinct point in the selected passages that "
             "directly answers the question. If several passages "
             "mention different examples of the same category, "
             "give each example as its own claim.\n"
@@ -1454,6 +1495,8 @@ class RAGPipeline:
                 "no usable passages",
                 self.MISSING_MESSAGE,
             )
+
+        all_passages_for_audit = list(passages)
 
         # Filter out passages that discuss the same words but do not
         # actually answer the question. This is a candidate filter, not
@@ -1666,7 +1709,7 @@ class RAGPipeline:
         audit_passed = await self._audit_answer_relevance(
             question=retrieval_query,
             claims=kept_claims,
-            passages=passages,
+            passages=all_passages_for_audit,
         )
         if not audit_passed:
             return self._refuse(
