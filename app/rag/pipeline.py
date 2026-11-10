@@ -1104,12 +1104,89 @@ class RAGPipeline:
             and all(verdicts.values())
         )
 
+    async def _select_relevant_passages(self, question, passages):
+        """Compare evidence against the exact question before generation.
+
+        The reranker supplies candidates, not proof that each candidate
+        answers the question. A separate, constrained selection task makes
+        the answer model explicitly consider the competing source contexts.
+        No passage is accepted as relevant based on keyword overlap alone.
+        """
+        if len(passages) <= 1:
+            return passages
+
+        blocks = []
+        for passage in passages:
+            blocks.append(
+                f"PASSAGE {passage['source_index']}\n"
+                f"Source question: {passage['source_question'] or '(none)'}\n"
+                f"Source answer: {passage['source_answer'][:self.VERIFIER_PASSAGE_CHARS]}"
+            )
+
+        system = (
+            "You select evidence for an Islamic question-answering system. "
+            "Use only the supplied passages, not outside knowledge. "
+            "For EACH passage, decide whether its source answer directly "
+            "addresses the user's exact question. A passage can truthfully "
+            "mention the same words but answer a different question, "
+            "describe a particular historical incident, or discuss an "
+            "unrelated reward. Such a passage must be excluded from a "
+            "general answer unless it directly establishes that answer. "
+            "Compare all passages; do not automatically select the first. "
+            "Include multiple passages when they contribute distinct, "
+            "directly relevant evidence. If uncertain, exclude the passage. "
+            "Return only JSON: {\"relevant_indexes\":[0,2]}. "
+            "Use the actual passage indexes. An empty list is allowed."
+        )
+        user = (
+            f"EXACT QUESTION:\n{question}\n\n"
+            f"CANDIDATE PASSAGES:\n{chr(10).join(blocks)}"
+        )
+        start = time.perf_counter()
+        try:
+            raw = await ollama_client.generate(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                json_mode=True,
+                task="verify",
+            )
+            result = self._parse_json(raw)
+            indexes = result.get("relevant_indexes")
+            valid = {item["source_index"] for item in passages}
+            if (
+                not isinstance(indexes, list)
+                or any(type(index) is not int or index not in valid for index in indexes)
+                or len(indexes) != len(set(indexes))
+            ):
+                raise ValueError("Invalid evidence selection indexes")
+        except (ValueError, TypeError, KeyError) as error:
+            print(f"[RAG SELECT] Selection failed: {error}", flush=True)
+            # Fail closed rather than reverting to unfiltered evidence.
+            return []
+
+        print(
+            f"[TIMING] Evidence selection: {time.perf_counter() - start:.2f}s",
+            flush=True,
+        )
+        print(f"[RAG SELECT] Relevant passage indexes: {indexes}", flush=True)
+        selected = set(indexes)
+        return [item for item in passages if item["source_index"] in selected]
+
     @staticmethod
     def _assemble_answer(claims):
         sentences = []
+        seen = set()
 
         for claim in claims:
             text = claim["text"].strip().rstrip(",;:-/ ")
+            # Only remove normalized exact duplicates. Similar statements
+            # are left intact rather than risking loss of distinct rulings.
+            key = RAGPipeline._normalize_text(text)
+            if not key or key in seen:
+                continue
+            seen.add(key)
 
             if text and text[-1] not in ".!?\"')”’":
                 text += "."
@@ -1210,6 +1287,9 @@ class RAGPipeline:
             "part of the cited passage (not from its question) "
             "and must itself state or directly support the "
             "claim.\n"
+            "Never combine non-adjacent parts of a passage into one quote. "
+            "If a sentence contains a list, copy a continuous span from "
+            "the source exactly, without skipping intervening words.\n"
             "Do not put citations inside claim text.\n"
             f"Use at most {self.MAX_CLAIMS} claims.\n"
             "If unsupported, return exactly:\n"
@@ -1372,6 +1452,18 @@ class RAGPipeline:
         if not passages:
             return self._refuse(
                 "no usable passages",
+                self.MISSING_MESSAGE,
+            )
+
+        # Filter out passages that discuss the same words but do not
+        # actually answer the question. This is a candidate filter, not
+        # a substitute for quote validation and claim verification.
+        passages = await self._select_relevant_passages(
+            retrieval_query, passages
+        )
+        if not passages:
+            return self._refuse(
+                "no passage passed comparative evidence selection",
                 self.MISSING_MESSAGE,
             )
 
