@@ -1,11 +1,17 @@
 import json
+
 import math
+
 import re
+
 import time
+
 import unicodedata
 
 from app.rag.retriever import rag_retriever
+
 from app.rag.reranker import rag_reranker
+
 from app.llm.client import ollama_client
 
 class RAGPipeline:
@@ -1946,7 +1952,11 @@ class RAGPipeline:
 
                 "Identify the exact action, subject, and outcome asked about. "
 
-                "Choose evidence only if it explicitly answers those elements. "
+                "Choose evidence only if it supports an answer to the exact question. "
+                "For broad explanatory questions, a passage giving a concrete "
+                "reason, benefit, consequence, or example can support a clearly "
+                "qualified partial answer. Do not pretend that partial evidence "
+                "proves a complete general explanation. "
 
                 "Shared words or a generally related moral lesson are insufficient. "
                 "For reward questions, the source must connect the SAME action "
@@ -2089,9 +2099,22 @@ class RAGPipeline:
 
         if primary is None:
 
-            print("[RAG SELECT] No majority for a usable passage", flush=True)
-
-            return []
+            # A split vote is inconclusive, not proof of irrelevance.
+            # Allow one non-null candidate to proceed ONLY to the existing
+            # exact-quote, claim, and independent relevance verification.
+            # No passage is automatically accepted as a final answer.
+            non_null_votes = [vote[0] for vote in votes if vote[0] is not None]
+            distinct = set(non_null_votes)
+            if len(distinct) == 1 and non_null_votes:
+                primary = non_null_votes[0]
+                print(
+                    f"[RAG SELECT] Provisional evidence {primary}; "
+                    "downstream verification required",
+                    flush=True,
+                )
+            else:
+                print("[RAG SELECT] No usable consensus", flush=True)
+                return []
 
         chosen = [primary]
 
@@ -3107,4 +3130,4 @@ class RAGPipeline:
 
         )
 
-rag_pipeline = RAGPipeline() 
+rag_pipeline = RAGPipeline()
