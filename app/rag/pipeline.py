@@ -1,4 +1,5 @@
 import json
+from difflib import SequenceMatcher
 
 import math
 
@@ -1016,6 +1017,56 @@ class RAGPipeline:
 
         return None
 
+    @classmethod
+    def _recover_source_quote(cls, quote, source_text):
+        """Recover a near-verbatim quote from the cited source, never invent text.
+
+        Only formatting/minor copying errors qualify. Semantic similarity alone
+        is deliberately insufficient. The independent claim verifier still
+        checks whether the recovered evidence supports the claim.
+        """
+        quote_words = cls._normalize_text(quote).split()
+        if not 5 <= len(quote_words) <= 120:
+            return None
+
+        source = str(source_text)
+        # Keep offsets so the recovered quote is copied from the source itself.
+        normalized_source = unicodedata.normalize("NFKC", source)
+        matches = list(re.finditer(r"[^\W_]+", normalized_source.casefold()))
+        words = [m.group() for m in matches]
+        if len(words) < 5:
+            return None
+
+        length = len(quote_words)
+        min_length = max(5, int(length * 0.80))
+        max_length = min(len(words), int(length * 1.20) + 2)
+        if min_length > max_length:
+            return None
+
+        # Require a strong literal overlap. Do not use semantic embeddings
+        # to manufacture a quote from merely related source material.
+        quote_set = set(quote_words)
+        best = (0.0, None, None)
+        for start in range(len(words) - min_length + 1):
+            if words[start] not in quote_set:
+                continue
+            for window_length in range(min_length, min(max_length, len(words) - start) + 1):
+                candidate_words = words[start:start + window_length]
+                score = SequenceMatcher(
+                    None, quote_words, candidate_words, autojunk=False
+                ).ratio()
+                if score > best[0]:
+                    best = (score, start, start + window_length)
+
+        score, start, end = best
+        if start is None or score < 0.88:
+            return None
+
+        recovered = normalized_source[matches[start].start():matches[end - 1].end()]
+        if len(cls._normalize_text(recovered).split()) < 5:
+            return None
+        return recovered
+
     def _validate_claims(
 
         self,
@@ -1178,17 +1229,23 @@ class RAGPipeline:
 
             ):
 
-                print(
-
-                    f"[RAG EVIDENCE] Claim {position}: "
-
-                    f"quote mismatch (passage {index})",
-
-                    flush=True,
-
+                recovered = self._recover_source_quote(
+                    quote, passage["source_answer"]
                 )
-
-                continue
+                if recovered is None:
+                    print(
+                        f"[RAG EVIDENCE] Claim {position}: "
+                        f"quote mismatch, recovery rejected (passage {index})",
+                        flush=True,
+                    )
+                    continue
+                quote = recovered
+                normalized_quote = self._normalize_text(recovered)
+                print(
+                    f"[RAG EVIDENCE] Claim {position}: "
+                    f"recovered near-verbatim source quote (passage {index})",
+                    flush=True,
+                )
 
             key = self._normalize_text(text)
 
@@ -2420,6 +2477,8 @@ class RAGPipeline:
 
             "claim.\n"
 
+            "The quote is an evidence extract, not a paraphrase of your claim. "
+            "Copy punctuation, numbering and intervening words as printed. "
             "Never combine non-adjacent parts of a passage into one quote. "
 
             "If a sentence contains a list, copy a continuous span from "
