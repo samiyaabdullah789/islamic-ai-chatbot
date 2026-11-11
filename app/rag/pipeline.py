@@ -3107,4 +3107,4 @@ class RAGPipeline:
 
         )
 
-rag_pipeline = RAGPipeline()
+rag_pipeline = RAGPipeline() 
