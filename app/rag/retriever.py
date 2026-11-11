@@ -9,37 +9,42 @@ from app.vector_store.chroma_store import chroma_store
 
 
 class RAGRetriever:
-    """Semantic retrieval baseline, preserving source and Madhhab filtering."""
+    """Semantic retrieval with safe query simplification and existing filters."""
 
     QUERY_FILLER_WORDS = {
-        "give", "me", "one", "some", "please", "tell", "show",
-        "share", "what", "the", "a", "an", "about", "islam", "islamic",
+        "give", "me", "please", "tell", "show", "share", "explain",
+        "what", "which", "who", "how", "does", "do", "did", "the",
+        "a", "an", "about", "of", "in", "is", "are", "was", "were",
+        "to", "for", "on", "and", "according", "regarding", "teach",
+        "teaches", "say", "says", "islam", "islamic",
     }
 
     @staticmethod
     def _normalize(text: str) -> str:
-        normalized = unicodedata.normalize("NFKC", str(text))
-        return " ".join(normalized.strip().split())
+        return " ".join(unicodedata.normalize("NFKC", str(text)).strip().split())
 
     def build_search_queries(self, query: str) -> list[str]:
         original = self._normalize(query)
         if not original:
             return []
         words = re.findall(r"[^\W_]+", original, flags=re.UNICODE)
-        simplified = " ".join(
-            word for word in words
-            if word.casefold() not in self.QUERY_FILLER_WORDS
-        ).strip()
-        queries = [original]
-        if simplified and len(simplified) >= 5 and simplified.casefold() != original.casefold():
-            queries.append(simplified)
-        return queries
+        core = [word for word in words if word.casefold() not in self.QUERY_FILLER_WORDS]
+        # Do not issue a second embedding/search for a single vague token.
+        # The original question is always searched without modification.
+        simplified = " ".join(core)
+        if (
+            len(core) >= 2
+            and len(simplified) >= 8
+            and simplified.casefold() != " ".join(words).casefold()
+        ):
+            return [original, simplified]
+        return [original]
 
     @staticmethod
     def is_clearly_general_question(query: str) -> bool:
-        normalized = " ".join(
-            re.findall(r"[^\W_]+", unicodedata.normalize("NFKC", str(query)).casefold())
-        )
+        normalized = " ".join(re.findall(
+            r"[^\W_]+", unicodedata.normalize("NFKC", str(query)).casefold()
+        ))
         if not normalized:
             return False
         fiqh_terms = {
@@ -61,11 +66,8 @@ class RAGRetriever:
 
     @staticmethod
     def _valid_distance(distance: object) -> float:
-        if (
-            isinstance(distance, (int, float))
-            and not isinstance(distance, bool)
-            and math.isfinite(distance)
-        ):
+        if (isinstance(distance, (int, float)) and not isinstance(distance, bool)
+                and math.isfinite(distance)):
             return float(distance)
         return float("inf")
 
@@ -147,38 +149,24 @@ class RAGRetriever:
             vectors = await embedding_service.embed([search_query])
             if len(vectors) != 1:
                 raise ValueError("Query embedding count mismatch")
-            print(
-                f"[TIMING] Query {query_index + 1} embedding: "
-                f"{time.perf_counter() - start:.2f}s", flush=True,
-            )
+            print(f"[TIMING] Query {query_index + 1} embedding: {time.perf_counter() - start:.2f}s", flush=True)
             start = time.perf_counter()
             results = chroma_store.search(
                 query_embedding=vectors[0], limit=limit, where=where_filter,
             )
             documents = self._extract_results(results, query_index)
             self._merge_documents(documents_by_id, documents)
-            print(
-                f"[TIMING] Query {query_index + 1} ChromaDB search: "
-                f"{time.perf_counter() - start:.2f}s", flush=True,
-            )
+            print(f"[TIMING] Query {query_index + 1} ChromaDB search: {time.perf_counter() - start:.2f}s", flush=True)
             print(f"[RAG] Query {query_index + 1} candidates: {len(documents)}", flush=True)
-        documents = sorted(
-            documents_by_id.values(),
-            key=lambda item: (item["distance"], item["id"]),
-        )
+        documents = sorted(documents_by_id.values(), key=lambda item: (item["distance"], item["id"]))
         if test_source_id is not None:
-            documents = [
-                document for document in documents
-                if str(document["metadata"].get("source_id")) == str(test_source_id)
-            ]
+            documents = [document for document in documents if str(document["metadata"].get("source_id")) == str(test_source_id)]
         print(f"[RAG] Unique retrieved documents: {len(documents)}", flush=True)
         for index, document in enumerate(documents[:5], start=1):
             metadata = document["metadata"]
             print(
-                f"[RAG] Candidate {index}: "
-                f"source={metadata.get('source_name', 'Unknown')} | "
-                f"source_id={metadata.get('source_id')} | "
-                f"madhhab={metadata.get('madhhab', 'N/A')} | "
+                f"[RAG] Candidate {index}: source={metadata.get('source_name', 'Unknown')} | "
+                f"source_id={metadata.get('source_id')} | madhhab={metadata.get('madhhab', 'N/A')} | "
                 f"distance={document['distance']:.4f}", flush=True,
             )
         print(f"[TIMING] Retriever total: {time.perf_counter() - total_start:.2f}s", flush=True)

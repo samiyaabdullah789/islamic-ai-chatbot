@@ -10,132 +10,74 @@ from app.core.config import settings
 
 
 class RAGReranker:
+    """
+    Generic heuristic reranker.
+
+    Uses:
+    - Semantic retrieval distance
+    - Question and answer keyword coverage
+    - Metadata relevance
+    - Topic coverage
+    - Near-duplicate filtering
+    """
+
     STOP_WORDS = {
-        "give", "me", "one", "some", "about",
-        "the", "a", "an", "of", "in", "is",
-        "are", "what", "how", "does", "do",
-        "tell", "please", "show", "can", "you",
-        "islam", "islamic", "for", "and", "to",
-        "on", "regarding", "teach", "teaches",
-        "says", "that", "which", "who", "with",
-        "from", "this", "these", "those", "it",
-        "according", "school", "schools",
-        "i", "whether",
+        "a", "an", "the", "is", "are", "was", "were",
+        "what", "which", "who", "how", "why", "when",
+        "where", "do", "does", "did", "can", "could",
+        "would", "should", "will", "may", "might",
+        "of", "in", "on", "at", "to", "for", "from",
+        "with", "and", "or", "but", "about", "that",
+        "this", "these", "those", "it", "its",
+        "me", "my", "you", "your", "we", "our",
+        "give", "tell", "show", "share", "please",
+        "explain", "describe", "provide", "some",
+        "one", "any", "according", "regarding",
+        "islam", "islamic",
     }
 
     SYNONYMS = (
-        {
-            "prayer", "prayers", "pray",
-            "praying", "namaz", "salah", "salat",
-        },
-        {
-            "fast", "fasting", "fasts",
-            "sawm", "siyam", "roza", "rozay",
-        },
+        {"prayer", "prayers", "pray", "praying",
+         "namaz", "salah", "salat"},
+        {"fast", "fasting", "fasts", "sawm",
+         "siyam", "roza", "rozay"},
         {"zakat", "zakah", "alms"},
         {"wudu", "wudhu", "wuzu", "ablution"},
-        {"ghusl", "bath"},
-        {
-            "obligatory", "obligation",
-            "mandatory", "required", "requirement",
-            "compulsory", "wajib", "fard", "farz",
-        },
-        {
-            "recommended", "recommendation",
-            "sunnah", "mustahabb",
-        },
-        {
-            "invalidate", "invalidates",
-            "invalidated", "nullify",
-            "nullifies", "nullified",
-        },
+        {"ghusl", "ritual", "bath"},
+        {"obligatory", "obligation", "mandatory",
+         "required", "requirement", "compulsory",
+         "wajib", "fard", "farz"},
+        {"recommended", "recommendation",
+         "sunnah", "mustahabb"},
+        {"invalidate", "invalidates", "invalidated",
+         "nullify", "nullifies", "nullified"},
         {"permissible", "allowed", "halal"},
         {"forbidden", "prohibited", "haram"},
         {"marriage", "nikah", "nikkah"},
     )
 
-    WINDOW_SIZE = 45
-
-    DEFINITION_PATTERNS = (
-        r"^what\s+(?:is|are|does)\b",
-        r"^define\b",
-        r"^what\s+does\s+.+\s+mean\b",
-        r"^explain\s+(?:the\s+)?(?:meaning|definition)\b",
-    )
-
-    DEFINITION_TERMS = {
-        "definition", "define", "meaning",
-        "means", "refers", "term",
-    }
-
-    PROCEDURE_TERMS = {
-        "calculate", "calculated", "calculation",
-        "date", "amount", "rate", "percentage",
-        "how", "when",
-    }
-
-    TOPIC_STOP_WORDS = STOP_WORDS | {
-        "haram", "halal", "allowed", "permissible",
-        "forbidden", "prohibited", "obligatory",
-        "mandatory", "required", "sunnah",
-        "listening", "listen", "heard", "hear",
-        "answer", "available", "sahih", "bukhari",
-        "hadith", "hadiths", "reference",
-        "source", "sources", "should", "could",
-        "would", "may", "must", "according",
-        "provide", "explain", "please",
-        "if", "he", "she", "they", "them",
-        "cannot", "something", "someone",
-        "anything", "anyone",
-    }
-
-    SUBJECT_GROUPS = (
-        {
-            "music", "musical", "instrument",
-            "instruments", "sing", "singing",
-            "singer", "singers", "song", "songs",
-        },
-        {"zakat", "zakah", "alms"},
-        {
-            "prayer", "prayers", "pray",
-            "praying", "salah", "salat", "namaz",
-        },
-        {
-            "fast", "fasts", "fasting",
-            "sawm", "siyam", "roza", "rozay",
-        },
-        {"wudu", "wudhu", "wuzu", "ablution"},
-        {"ghusl", "ritual", "bath"},
-        {"marriage", "nikah", "nikkah"},
-    )
-
-    # Heuristic-only ranking uses its original score scale.
-    TOPIC_WEIGHT = 3.0
-    NO_TOPIC_PENALTY = 1.0
-
-    @staticmethod
-    def tokenize(text: str) -> set[str]:
-        normalized = unicodedata.normalize(
-            "NFKC", str(text)
-        ).casefold().replace("’", "'")
-
-        return set(
-            re.findall(r"[^\W_]+", normalized)
-        )
+    WINDOW_SIZE = 60
+    TOPIC_WEIGHT = 0.75
+    NO_TOPIC_PENALTY = 0.35
+    DUPLICATE_THRESHOLD = 0.88
 
     @staticmethod
     def _token_list(text: str) -> list[str]:
-        normalized = unicodedata.normalize(
-            "NFKC", str(text)
-        ).casefold().replace("’", "'")
+        text = unicodedata.normalize(
+            "NFKC", str(text or "")
+        ).casefold()
 
-        return re.findall(
-            r"[^\W_]+", normalized
-        )
+        text = text.replace("’", "'")
+
+        return re.findall(r"[^\W_]+", text)
+
+    @classmethod
+    def tokenize(cls, text: str) -> set[str]:
+        return set(cls._token_list(text))
 
     @staticmethod
     def _focused_question(question: str) -> str:
-        focused = str(question).strip()
+        question = str(question or "").strip()
 
         focused = re.split(
             r"\b(?:answer according to|"
@@ -143,24 +85,18 @@ class RAGReranker:
             r"provide (?:the )?"
             r"(?:citations?|references?|sources?)|"
             r"cite (?:the )?sources?)\b",
-            focused,
+            question,
             maxsplit=1,
             flags=re.I,
         )[0]
 
-        return (
-            focused.strip(" \t\n.!?")
-            or str(question).strip()
-        )
+        return focused.strip(" \t\n.!?") or question
 
     def get_concepts(
         self,
         question: str,
     ) -> list[set[str]]:
-        words = (
-            self.tokenize(question)
-            - self.STOP_WORDS
-        )
+        words = self.tokenize(question) - self.STOP_WORDS
 
         concepts = []
         seen = set()
@@ -175,12 +111,7 @@ class RAGReranker:
                 None,
             )
 
-            concept = (
-                set(group)
-                if group is not None
-                else {word}
-            )
-
+            concept = set(group) if group else {word}
             key = frozenset(concept)
 
             if key not in seen:
@@ -193,29 +124,24 @@ class RAGReranker:
         self,
         question: str,
     ) -> list[set[str]]:
-        tokens = self.tokenize(
+        return self.get_concepts(
             self._focused_question(question)
         )
 
-        concepts = []
-        used = set()
+    @staticmethod
+    def _coverage(
+        concepts: list[set[str]],
+        tokens: set[str],
+    ) -> float:
+        if not concepts:
+            return 0.0
 
-        for group in self.SUBJECT_GROUPS:
-            if tokens & group:
-                concepts.append(set(group))
-                used.update(tokens & group)
-
-        remaining = (
-            tokens
-            - used
-            - self.TOPIC_STOP_WORDS
+        matched = sum(
+            bool(tokens.intersection(concept))
+            for concept in concepts
         )
 
-        for token in sorted(remaining):
-            if len(token) >= 3:
-                concepts.append({token})
-
-        return concepts
+        return matched / len(concepts)
 
     def _topic_coverage(
         self,
@@ -224,33 +150,18 @@ class RAGReranker:
     ) -> float:
         concepts = self._topic_concepts(question)
 
-        if not concepts:
-            return 0.0
-
         metadata = document.get("metadata") or {}
 
-        content = str(
-            document.get("content", "")
-        )
+        text = " ".join([
+            str(document.get("content") or ""),
+            str(metadata.get("category") or ""),
+            str(metadata.get("tags") or ""),
+        ])
 
-        category = str(
-            metadata.get("category", "")
+        return self._coverage(
+            concepts,
+            self.tokenize(text),
         )
-
-        tags = str(
-            metadata.get("tags", "")
-        )
-
-        tokens = self.tokenize(
-            content + " " + category + " " + tags
-        )
-
-        matched = sum(
-            bool(tokens & concept)
-            for concept in concepts
-        )
-
-        return matched / len(concepts)
 
     @staticmethod
     def _split_sections(
@@ -268,22 +179,7 @@ class RAGReranker:
                 match.group(2).strip(),
             )
 
-        return "", content.strip()
-
-    @staticmethod
-    def _coverage(
-        concepts: list[set[str]],
-        tokens: set[str],
-    ) -> float:
-        if not concepts:
-            return 0.0
-
-        matched = sum(
-            bool(tokens & concept)
-            for concept in concepts
-        )
-
-        return matched / len(concepts)
+        return "", str(content).strip()
 
     def _best_window_coverage(
         self,
@@ -302,28 +198,16 @@ class RAGReranker:
             )
 
         best = 0.0
-        step = max(
-            1,
-            self.WINDOW_SIZE // 3,
-        )
+        step = max(1, self.WINDOW_SIZE // 3)
 
-        for start in range(
-            0,
-            len(words),
-            step,
-        ):
+        for start in range(0, len(words), step):
             window = set(
-                words[
-                    start:start + self.WINDOW_SIZE
-                ]
+                words[start:start + self.WINDOW_SIZE]
             )
 
             best = max(
                 best,
-                self._coverage(
-                    concepts,
-                    window,
-                ),
+                self._coverage(concepts, window),
             )
 
             if best >= 1.0:
@@ -332,13 +216,15 @@ class RAGReranker:
         return best
 
     @staticmethod
-    def _duplicate_key(
-        document: dict,
-    ) -> str:
-        return str(
-            document.get("id")
-            or document.get("content", "")
-        )
+    def _valid_distance(distance) -> float | None:
+        if (
+            isinstance(distance, (int, float))
+            and not isinstance(distance, bool)
+            and math.isfinite(distance)
+        ):
+            return max(0.0, float(distance))
+
+        return None
 
     @classmethod
     def _is_definition_question(
@@ -346,12 +232,20 @@ class RAGReranker:
         question: str,
     ) -> bool:
         normalized = " ".join(
-            question.casefold().split()
+            cls._token_list(question)
+        )
+
+        patterns = (
+            r"^what\s+(?:is|are)\b",
+            r"^define\b",
+            r"^what\s+does\s+.+\s+mean\b",
+            r"^explain\s+(?:the\s+)?"
+            r"(?:meaning|definition)\b",
         )
 
         return any(
             re.search(pattern, normalized)
-            for pattern in cls.DEFINITION_PATTERNS
+            for pattern in patterns
         )
 
     def _score(
@@ -360,194 +254,162 @@ class RAGReranker:
         concepts: list[set[str]],
         definition_question: bool,
     ) -> float:
-        content = str(
-            document.get("content", "")
-        )
+        content = str(document.get("content") or "")
+        metadata = document.get("metadata") or {}
 
-        question_section, answer_section = (
+        question_text, answer_text = (
             self._split_sections(content)
-        )
-
-        metadata = (
-            document.get("metadata") or {}
-        )
-
-        category = str(
-            metadata.get("category", "")
-        )
-
-        tags = str(
-            metadata.get("tags", "")
         )
 
         question_coverage = self._coverage(
             concepts,
-            self.tokenize(question_section),
+            self.tokenize(question_text),
         )
 
-        answer_coverage = (
-            self._best_window_coverage(
-                concepts,
-                answer_section,
-            )
+        answer_coverage = self._best_window_coverage(
+            concepts,
+            answer_text,
         )
+
+        metadata_text = " ".join([
+            str(metadata.get("category") or ""),
+            str(metadata.get("tags") or ""),
+        ])
 
         metadata_coverage = self._coverage(
             concepts,
-            self.tokenize(
-                category + " " + tags
-            ),
+            self.tokenize(metadata_text),
         )
 
-        distance = document.get("distance")
+        distance = self._valid_distance(
+            document.get("distance")
+        )
 
-        if (
-            isinstance(distance, (int, float))
-            and not isinstance(distance, bool)
-            and math.isfinite(distance)
-        ):
-            semantic = 1.0 / (
-                1.0 + max(
-                    float(distance),
-                    0.0,
-                )
-            )
-        else:
-            semantic = 0.0
+        semantic_score = (
+            1.0 / (1.0 + distance)
+            if distance is not None
+            else 0.0
+        )
 
         score = (
-            2.0 * semantic
+            2.0 * semantic_score
             + 2.5 * question_coverage
             + 1.5 * answer_coverage
             + 0.25 * metadata_coverage
         )
 
-        if question_section:
+        if question_text:
             if question_coverage == 0:
-                score -= 1.0
+                score -= 0.5
 
             if (
                 question_coverage < 0.5
                 and answer_coverage < 0.5
             ):
-                score -= 0.5
+                score -= 0.35
 
         if definition_question:
-            source_tokens = self.tokenize(
-                question_section
-            )
-
-            answer_tokens = self.tokenize(
-                answer_section
-            )
+            definition_terms = {
+                "definition", "define",
+                "meaning", "means", "refers",
+            }
 
             if (
-                source_tokens
-                & self.DEFINITION_TERMS
+                self.tokenize(answer_text)
+                & definition_terms
             ):
-                score += 2.0
-
-            elif (
-                source_tokens
-                & self.PROCEDURE_TERMS
-            ):
-                score -= 0.7
-
-            if (
-                answer_tokens
-                & self.DEFINITION_TERMS
-            ):
-                score += 0.35
-
-        doc_id = str(
-            document.get("id", "")
-        )
-
-        match = re.search(
-            r"-chunk-\d+-(\d+)$",
-            doc_id,
-        )
-
-        if (
-            match
-            and int(match.group(1)) == 0
-        ):
-            score += 0.15
+                score += 0.25
 
         return score
 
-    def _rank_documents(
+    @staticmethod
+    def _duplicate_key(document: dict) -> str:
+        return str(
+            document.get("id")
+            or document.get("content")
+            or ""
+        )
+
+    def _is_near_duplicate(
         self,
-        question: str,
-        documents: list[dict],
+        candidate: dict,
+        selected: dict,
+    ) -> bool:
+        candidate_text = str(
+            candidate.get("content") or ""
+        )
+
+        selected_text = str(
+            selected.get("content") or ""
+        )
+
+        if not candidate_text or not selected_text:
+            return False
+
+        candidate_tokens = self.tokenize(
+            candidate_text
+        )
+
+        selected_tokens = self.tokenize(
+            selected_text
+        )
+
+        if not candidate_tokens or not selected_tokens:
+            return False
+
+        intersection = len(
+            candidate_tokens & selected_tokens
+        )
+
+        union = len(
+            candidate_tokens | selected_tokens
+        )
+
+        similarity = intersection / max(1, union)
+
+        return similarity >= self.DUPLICATE_THRESHOLD
+
+    def _select_diverse(
+        self,
+        ranked: list[dict],
+        limit: int,
     ) -> list[dict]:
-        focused_question = (
-            self._focused_question(question)
-        )
+        selected = []
+        selected_ids = set()
 
-        concepts = self.get_concepts(
-            focused_question
-        )
+        for document in ranked:
+            doc_id = self._duplicate_key(document)
 
-        definition_question = (
-            self._is_definition_question(
-                focused_question
-            )
-        )
+            if doc_id in selected_ids:
+                continue
 
-        topic_scores = [
-            self._topic_coverage(
-                focused_question,
-                document,
-            )
-            for document in documents
-        ]
+            if any(
+                self._is_near_duplicate(document, previous)
+                for previous in selected
+            ):
+                continue
 
-        has_topic_matches = any(
-            score > 0
-            for score in topic_scores
-        )
+            selected.append(document)
+            selected_ids.add(doc_id)
 
-        scored = []
+            if len(selected) >= limit:
+                return selected
 
-        for document, topic_score in zip(
-            documents,
-            topic_scores,
-        ):
-            base_score = self._score(
-                document,
-                concepts,
-                definition_question,
-            )
+        # Fill remaining slots if diversity filtering
+        # leaves fewer passages than requested.
+        for document in ranked:
+            doc_id = self._duplicate_key(document)
 
-            final_score = base_score
+            if doc_id in selected_ids:
+                continue
 
-            if has_topic_matches:
-                if topic_score > 0:
-                    final_score += (
-                        self.TOPIC_WEIGHT
-                        * topic_score
-                    )
-                else:
-                    final_score -= (
-                        self.NO_TOPIC_PENALTY
-                    )
+            selected.append(document)
+            selected_ids.add(doc_id)
 
-            scored.append({
-                **document,
-                "heuristic_score": base_score,
-                "topic_score": topic_score,
-                "rerank_score": final_score,
-            })
+            if len(selected) >= limit:
+                break
 
-        scored.sort(
-            key=lambda document: (
-                -document["rerank_score"],
-                str(document.get("id", "")),
-            )
-        )
-
-        return scored
+        return selected
 
     async def rerank(
         self,
@@ -560,41 +422,70 @@ class RAGReranker:
         if not documents or limit <= 0:
             return []
 
-        scored = self._rank_documents(
-            question,
-            documents,
+        focused = self._focused_question(question)
+        concepts = self.get_concepts(focused)
+
+        definition_question = (
+            self._is_definition_question(focused)
         )
 
-        selected = []
-        selected_ids = set()
+        topic_scores = [
+            self._topic_coverage(focused, document)
+            for document in documents
+        ]
 
-        for document in scored:
-            doc_id = self._duplicate_key(
-                document
+        has_topic_matches = any(
+            score > 0 for score in topic_scores
+        )
+
+        scored = []
+
+        for document, topic_score in zip(
+            documents, topic_scores
+        ):
+            base_score = self._score(
+                document,
+                concepts,
+                definition_question,
             )
 
-            if doc_id in selected_ids:
-                continue
+            final_score = base_score
 
-            selected.append(document)
-            selected_ids.add(doc_id)
+            if has_topic_matches:
+                if topic_score > 0:
+                    final_score += (
+                        self.TOPIC_WEIGHT * topic_score
+                    )
+                else:
+                    final_score -= self.NO_TOPIC_PENALTY
 
-            if len(selected) >= limit:
-                break
+            scored.append({
+                **document,
+                "heuristic_score": base_score,
+                "topic_score": topic_score,
+                "rerank_score": final_score,
+            })
+
+        scored.sort(
+            key=lambda item: (
+                -item["rerank_score"],
+                str(item.get("id") or ""),
+            )
+        )
+
+        selected = self._select_diverse(
+            scored, limit
+        )
 
         for index, document in enumerate(
-            selected,
-            start=1,
+            selected, start=1
         ):
-            metadata = (
-                document.get("metadata") or {}
-            )
+            metadata = document.get("metadata") or {}
 
             print(
                 f"[RERANK] Selected {index}: "
                 f"source={metadata.get('source_name', 'Unknown')} | "
-                f"madhhab={metadata.get('madhhab', 'N/A')} | "
-                f"score={document['rerank_score']:.4f} | "
+                f"score={document['rerank_score']:.6f} | "
                 f"topic={document['topic_score']:.3f} | "
                 f"id={document.get('id')}",
                 flush=True,
@@ -611,24 +502,26 @@ class RAGReranker:
 
 class CrossEncoderReranker:
     """
-    Hybrid reranker using:
-    1. CrossEncoder semantic relevance
-    2. Keyword heuristic relevance
-    3. Subject/topic relevance
-    4. Reciprocal rank fusion
+    Hybrid reranker.
 
-    Evidence validation remains in RAGPipeline.
+    Combines:
+    1. CrossEncoder relevance
+    2. Heuristic relevance
+    3. Topic coverage
+    4. Reciprocal rank fusion
+    5. Near-duplicate filtering
+
+    Final evidence verification remains in RAGPipeline.
     """
 
     FUSION_K = 60
 
-    CROSS_ENCODER_WEIGHT = 1.0
+    CROSS_ENCODER_WEIGHT = 1.5
     HEURISTIC_WEIGHT = 1.0
 
-    # Small topic adjustments relative to fusion scores.
-    # These are tuning values, not evaluation-specific rules.
-    TOPIC_WEIGHT = 0.0
-    NO_TOPIC_PENALTY = 0.0
+    # Modest adjustments relative to fusion scores.
+    TOPIC_WEIGHT = 0.004
+    NO_TOPIC_PENALTY = 0.002
 
     def __init__(self):
         self._model = None
@@ -638,7 +531,7 @@ class CrossEncoderReranker:
     def _load_model(self):
         with self._lock:
             if self._model is None:
-                load_start = time.perf_counter()
+                start = time.perf_counter()
 
                 from sentence_transformers import (
                     CrossEncoder,
@@ -652,28 +545,16 @@ class CrossEncoderReranker:
 
                 print(
                     f"[TIMING] CrossEncoder model load: "
-                    f"{time.perf_counter() - load_start:.2f}s",
+                    f"{time.perf_counter() - start:.2f}s",
                     flush=True,
                 )
 
         return self._model
 
     @staticmethod
-    def _focused_question(
-        question: str,
-    ) -> str:
+    def _focused_question(question: str) -> str:
         return RAGReranker._focused_question(
             question
-        )
-
-    def _topic_coverage(
-        self,
-        question: str,
-        document: dict,
-    ) -> float:
-        return self._heuristic._topic_coverage(
-            question,
-            document,
         )
 
     def _score(
@@ -686,32 +567,32 @@ class CrossEncoderReranker:
         pairs = [
             (
                 question,
-                str(
-                    document.get(
-                        "content",
-                        "",
-                    )
-                ),
+                str(document.get("content") or ""),
             )
             for document in documents
         ]
 
-        inference_start = time.perf_counter()
+        start = time.perf_counter()
 
-        predictions = model.predict(
-            pairs
-        )
+        predictions = model.predict(pairs)
 
         print(
             f"[TIMING] CrossEncoder inference: "
-            f"{time.perf_counter() - inference_start:.2f}s",
+            f"{time.perf_counter() - start:.2f}s",
             flush=True,
         )
 
-        return [
-            float(score)
-            for score in predictions
-        ]
+        scores = []
+
+        for prediction in predictions:
+            score = float(prediction)
+
+            if not math.isfinite(score):
+                score = float("-inf")
+
+            scores.append(score)
+
+        return scores
 
     @staticmethod
     def _ranks(
@@ -739,7 +620,7 @@ class CrossEncoderReranker:
         documents: list[dict],
         limit: int = 5,
     ) -> list[dict]:
-        start = time.perf_counter()
+        total_start = time.perf_counter()
 
         if not documents or limit <= 0:
             return []
@@ -749,14 +630,12 @@ class CrossEncoderReranker:
         )
 
         print(
-            f"[RERANK] Original query: "
-            f"{question}",
+            f"[RERANK] Original query: {question}",
             flush=True,
         )
 
         print(
-            f"[RERANK] Focused query: "
-            f"{focused_question}",
+            f"[RERANK] Focused query: {focused_question}",
             flush=True,
         )
 
@@ -766,10 +645,8 @@ class CrossEncoderReranker:
             documents,
         )
 
-        concepts = (
-            self._heuristic.get_concepts(
-                focused_question
-            )
+        concepts = self._heuristic.get_concepts(
+            focused_question
         )
 
         definition_question = (
@@ -787,43 +664,31 @@ class CrossEncoderReranker:
             for document in documents
         ]
 
-        cross_ranks = self._ranks(
-            cross_scores
-        )
-
-        heuristic_ranks = self._ranks(
-            heuristic_scores
-        )
-
         topic_scores = [
-            self._topic_coverage(
+            self._heuristic._topic_coverage(
                 focused_question,
                 document,
             )
             for document in documents
         ]
 
+        cross_ranks = self._ranks(cross_scores)
+        heuristic_ranks = self._ranks(
+            heuristic_scores
+        )
+
         has_topic_matches = any(
-            score > 0
-            for score in topic_scores
+            score > 0 for score in topic_scores
         )
 
         scored = []
 
-        for index, document in enumerate(
-            documents
-        ):
+        for index, document in enumerate(documents):
             fusion_score = (
                 self.CROSS_ENCODER_WEIGHT
-                / (
-                    self.FUSION_K
-                    + cross_ranks[index]
-                )
+                / (self.FUSION_K + cross_ranks[index])
                 + self.HEURISTIC_WEIGHT
-                / (
-                    self.FUSION_K
-                    + heuristic_ranks[index]
-                )
+                / (self.FUSION_K + heuristic_ranks[index])
             )
 
             topic_score = topic_scores[index]
@@ -832,8 +697,7 @@ class CrossEncoderReranker:
             if has_topic_matches:
                 if topic_score > 0:
                     final_score += (
-                        self.TOPIC_WEIGHT
-                        * topic_score
+                        self.TOPIC_WEIGHT * topic_score
                     )
                 else:
                     final_score -= (
@@ -863,27 +727,14 @@ class CrossEncoderReranker:
             key=lambda document: (
                 -document["rerank_score"],
                 document["cross_encoder_rank"],
+                str(document.get("id") or ""),
             )
         )
 
-        selected = []
-        selected_ids = set()
-
-        for document in scored:
-            doc_id = (
-                self._heuristic._duplicate_key(
-                    document
-                )
-            )
-
-            if doc_id in selected_ids:
-                continue
-
-            selected.append(document)
-            selected_ids.add(doc_id)
-
-            if len(selected) >= limit:
-                break
+        selected = self._heuristic._select_diverse(
+            scored,
+            limit,
+        )
 
         print(
             "[RERANK DEBUG] Hybrid candidate ranking:",
@@ -908,9 +759,7 @@ class CrossEncoderReranker:
             selected,
             start=1,
         ):
-            metadata = (
-                document.get("metadata") or {}
-            )
+            metadata = document.get("metadata") or {}
 
             print(
                 f"[RERANK] Selected {index}: "
@@ -924,7 +773,7 @@ class CrossEncoderReranker:
 
         print(
             f"[TIMING] Hybrid reranker total: "
-            f"{time.perf_counter() - start:.2f}s",
+            f"{time.perf_counter() - total_start:.2f}s",
             flush=True,
         )
 
