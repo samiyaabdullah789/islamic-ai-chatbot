@@ -1358,7 +1358,11 @@ class RAGPipeline:
 
             "the passage it cites states it directly. It does "
 
-            "not need to appear in any other passage.\n"
+            "not need to appear in any other passage. A quote "
+
+            "being an exact substring is NOT proof that the "
+
+            "claim's interpretation is correct.\n"
 
             "3. Different passages may mention different "
 
@@ -1400,7 +1404,15 @@ class RAGPipeline:
 
             "come from a passage for that Madhhab.\n"
 
-            "9. When unsure whether the passage states the "
+            "9. Check attribution and scope: a narrator's "
+
+            "story, a prophetic response, and a quoted Quranic "
+
+            "verse must not be conflated. Preserve negation, "
+
+            "modality, subject, and conditions exactly.\n"
+
+            "10. When unsure whether the passage states the "
 
             "claim, mark it \"unsupported\".\n\n"
 
@@ -1750,7 +1762,15 @@ class RAGPipeline:
 
             "directly answers the user's precise question, not merely "
 
-            "whether it is a true quotation from a source. Compare the "
+            "whether it is a true quotation from a source. Also reject "
+
+            "misleading attribution, inverted negation, or claims that "
+
+            "change who a quoted statement refers to. A single narrow "
+
+            "example is not automatically a complete answer to a broad "
+
+            "explanatory question. Compare the "
 
             "cited passage with ALL available passages. A claim about a "
 
@@ -1784,7 +1804,15 @@ class RAGPipeline:
 
             "answers_question must be true only if the relevant claims "
 
-            "collectively give a direct answer."
+            "collectively give a direct and sufficiently informative "
+
+            "answer to the question, rather than just an isolated "
+
+            "example. If the available evidence supports only a "
+
+            "partial answer, return false unless the claims explicitly "
+
+            "qualify that limitation."
 
         )
 
@@ -1900,7 +1928,13 @@ class RAGPipeline:
 
             r"several|multiple|various|examples|all the|both|"
 
-            r"how many|what are the|which are the)\b",
+            r"how many|what are the|which are the|"
+
+            r"importance of|significance of|teach about|"
+
+            r"teachings about|benefits of|virtues of|"
+
+            r"why is|why are|explain|describe)\b",
 
             q,
 
@@ -1975,9 +2009,15 @@ class RAGPipeline:
 
                 "Return JSON only: primary_index (integer or null), "
 
-                "supporting_indexes (list of integers). For a single-answer "
+                "supporting_indexes (list of integers). For a narrowly scoped factual question, prefer one "
 
-                "question, supporting_indexes must be empty."
+                "direct passage. For a broad explanatory question, return "
+
+                "additional supporting passages only if they contribute "
+
+                "distinct, directly relevant points. Never include "
+
+                "passages merely because they mention the topic."
 
             )
 
@@ -2120,17 +2160,31 @@ class RAGPipeline:
 
         if multi:
 
-            supporters = [set(supporting) for vote_primary, supporting in votes
+            # Supporting evidence is optional and must be nominated by
 
-                          if vote_primary == primary]
+            # at least two independent orderings. A primary-index tie
 
-            if supporters:
+            # should not discard agreement on other relevant passages.
 
-                agreed = set.intersection(*supporters)
+            support_votes = {}
 
-                chosen.extend(p["source_index"] for p in passages
+            for _, supporting in votes:
 
-                              if p["source_index"] in agreed and p["source_index"] != primary)
+                for index in supporting:
+
+                    if index != primary:
+
+                        support_votes[index] = support_votes.get(index, 0) + 1
+
+            chosen.extend(
+
+                p["source_index"] for p in passages
+
+                if p["source_index"] != primary
+
+                and support_votes.get(p["source_index"], 0) >= 2
+
+            )
 
         passage_map = {p["source_index"]: p for p in passages}
 
@@ -2232,7 +2286,13 @@ class RAGPipeline:
 
             "9. You may explain, summarize, and rephrase "
 
-            "the source, but preserve its meaning.\n"
+            "the source, but preserve its meaning. Do not describe a "
+
+            "Quranic verse or hadith as saying something it does not "
+
+            "literally say. Distinguish the narrator's situation, "
+
+            "the Prophet's response, and any quoted revelation.\n"
 
             "10. Never change a legal ruling or its "
 
@@ -2270,13 +2330,17 @@ class RAGPipeline:
 
             "C. The first AVAILABLE PASSAGE is the selected primary "
 
-            "evidence for this question. For a single-answer question, "
+            "evidence for this question. For a narrowly scoped factual "
 
-            "answer from that primary passage only. For an explicit "
+            "question, use the most direct passage. For broad explanatory "
 
-            "multi-part question, additional passages may support distinct "
+            "questions, synthesize distinct directly supported points "
 
-            "parts. Prefer passages whose source question and answer directly "
+            "from other AVAILABLE PASSAGES when present. Do not claim "
+
+            "that one example fully explains a broad topic. "
+
+            "Prefer passages whose source question and answer directly "
 
             "address the user's exact question. Ignore passages "
 
