@@ -1160,11 +1160,19 @@ class RAGPipeline:
             f"answers_question={result.get('answers_question')}",
             flush=True,
         )
-        # Do not silently return an unverified subset of the answer.
-        return (
-            result.get("answers_question") is True
-            and all(verdicts.values())
-        )
+        # Keep only claims independently judged relevant. The verifier has
+        # already checked their source quotes and factual support.
+        relevant_claims = [
+            claim for index, claim in enumerate(claims, start=1)
+            if verdicts[index]
+        ]
+        return {
+            "claims": relevant_claims,
+            "answers_question": (
+                result.get("answers_question") is True
+                and bool(relevant_claims)
+            ),
+        }
     @staticmethod
     def _question_needs_multiple_sources(question):
         """Detect explicit requests for a collection or comparison.
@@ -1546,14 +1554,13 @@ class RAGPipeline:
         topic = self._definition_topic(query)
         search_queries = [query]
         if topic:
-            search_queries.extend((
-                f"{topic} meaning definition obligatory charity religious duty",
-                f"{topic} is a pillar of Islam giving charity to the poor",
-            ))
+            # Topic-neutral expansion: never inject facts about a different
+            # Islamic subject into the user's retrieval query.
+            search_queries.append(f"{topic} meaning explanation")
+            if retry_mode:
+                search_queries.append(f"{topic} definition teachings")
         elif retry_mode:
             search_queries.append(f"{query} explanation evidence teachings")
-        if retry_mode and topic:
-            search_queries.append(f"{topic} obligatory duty prescribed giving wealth")
         combined = {}
         for search_query in search_queries:
             start = time.perf_counter()
@@ -1960,12 +1967,12 @@ class RAGPipeline:
             )
         # A second, comparative relevance check sees every retrieved
         # passage, not only the passages cited by the answer.
-        audit_passed = await self._audit_answer_relevance(
+        audit_result = await self._audit_answer_relevance(
             question=retrieval_query,
             claims=kept_claims,
             passages=all_passages_for_audit,
         )
-        if not audit_passed:
+        if not isinstance(audit_result, dict) or not audit_result.get("answers_question"):
             if not _retry_mode:
                 print("[RAG RETRY] Relevance audit failed; retrying", flush=True)
                 return await self.generate(question, conversation_history, madhhab, _retry_mode=True)
@@ -1973,6 +1980,10 @@ class RAGPipeline:
                 "independent relevance audit rejected the answer",
                 self.INVALID_MESSAGE,
             )
+        # Use only claims that passed both source verification and the
+        # independent question-relevance audit. Citations follow the subset.
+        kept_claims = audit_result["claims"]
+        print(f"[RAG AUDIT] Relevant verified claims retained: {len(kept_claims)}", flush=True)
         if hadith_request:
             answer = kept_claims[0]["text"]
         else:
