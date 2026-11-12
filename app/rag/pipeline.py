@@ -1500,6 +1500,84 @@ class RAGPipeline:
         except Exception as error:
             print(f"[LANGUAGE] Translation failed: {error}", flush=True)
             return answer
+    @staticmethod
+    def _definition_topic(query):
+        """Extract the subject of a short definition question, without fixed topics."""
+        text = " ".join(str(query).strip().split())
+        patterns = (
+            r"^what\s+(?:is|are)\s+(?:the\s+)?(.+?)\??$",
+            r"^define\s+(.+?)\??$",
+            r"^what\s+does\s+(.+?)\s+mean\??$",
+        )
+        for pattern in patterns:
+            match = re.match(pattern, text, re.I)
+            if not match:
+                continue
+            topic = re.sub(
+                r"\s+(?:in islam|according to islam|in the religion of islam)\s*$",
+                "", match.group(1), flags=re.I,
+            ).strip(" ?.!")
+            if 2 <= len(topic) <= 65 and len(topic.split()) <= 7:
+                return topic
+        return None
+
+    @staticmethod
+    def _is_subtype_only_passage(topic, passage):
+        """Recognize when the topic occurs only as part of a named subtype."""
+        text = str(passage.get("source_answer", ""))
+        root = str(topic).casefold().strip()
+        if not re.fullmatch(r"[a-z][a-z0-9 ]{1,60}", root):
+            return False
+        if " " in root:
+            return False
+        lowered = text.casefold()
+        occurrences = list(re.finditer(r"\b" + re.escape(root) + r"\b", lowered))
+        if not occurrences:
+            return False
+        return all(
+            re.match(r"-(?:ul|al|el|e|i)-?[a-z]+", lowered[m.end():])
+            is not None for m in occurrences
+        )
+
+    async def _retrieve_with_definition_expansion(
+        self, query, madhhab, general_question, retry_mode=False
+    ):
+        """Search alternate formulations and merge distinct indexed documents."""
+        topic = self._definition_topic(query)
+        search_queries = [query]
+        if topic:
+            search_queries.extend((
+                f"{topic} meaning definition obligatory charity religious duty",
+                f"{topic} is a pillar of Islam giving charity to the poor",
+            ))
+        elif retry_mode:
+            search_queries.append(f"{query} explanation evidence teachings")
+        if retry_mode and topic:
+            search_queries.append(f"{topic} obligatory duty prescribed giving wealth")
+        combined = {}
+        for search_query in search_queries:
+            start = time.perf_counter()
+            results = await rag_retriever.retrieve(
+                search_query,
+                limit=self.RETRIEVAL_LIMIT,
+                madhhab=madhhab,
+                general_question=general_question,
+            )
+            print(
+                f"[RAG EXPAND] query={search_query!r} | "
+                f"candidates={len(results)} | "
+                f"time={time.perf_counter() - start:.2f}s",
+                flush=True,
+            )
+            for doc in results:
+                key = str(doc.get("id") or "")
+                if not key:
+                    continue
+                if key not in combined:
+                    combined[key] = doc
+        print(f"[RAG EXPAND] Unique candidates: {len(combined)}", flush=True)
+        return list(combined.values()), topic
+
     async def generate(
         self,
         question: str,
@@ -1547,11 +1625,8 @@ class RAGPipeline:
             flush=True,
         )
         start = time.perf_counter()
-        documents = await rag_retriever.retrieve(
-            retrieval_query,
-            limit=self.RETRIEVAL_LIMIT,
-            madhhab=madhhab,
-            general_question=general_question,
+        documents, definition_topic = await self._retrieve_with_definition_expansion(
+            retrieval_query, madhhab, general_question, _retry_mode
         )
         print(
             "[TIMING] ChromaDB retrieval: "
@@ -1572,8 +1647,19 @@ class RAGPipeline:
         documents = await rag_reranker.rerank(
             retrieval_query,
             documents,
-            limit=self.MAX_PASSAGES,
+            limit=(12 if definition_topic else self.MAX_PASSAGES),
         )
+        if definition_topic:
+            prepared = self._prepare_passages(documents)
+            generic = [
+                p["document"] for p in prepared
+                if not self._is_subtype_only_passage(definition_topic, p)
+            ]
+            subtype = [
+                p["document"] for p in prepared
+                if self._is_subtype_only_passage(definition_topic, p)
+            ]
+            documents = (generic + subtype)[:self.MAX_PASSAGES]
         print(
             "[TIMING] Reranking: "
             f"{time.perf_counter() - start:.2f}s",
@@ -1592,6 +1678,18 @@ class RAGPipeline:
         passages = self._prepare_passages(
             documents
         )
+        if definition_topic:
+            generic_passages = [
+                passage for passage in passages
+                if not self._is_subtype_only_passage(definition_topic, passage)
+            ]
+            if generic_passages:
+                print(
+                    f"[RAG SCOPE] Excluded {len(passages) - len(generic_passages)} "
+                    "subtype-only passages from definition evidence",
+                    flush=True,
+                )
+                passages = generic_passages
         if not passages:
             return self._refuse(
                 "no usable passages",
@@ -1619,7 +1717,7 @@ class RAGPipeline:
         # named subtype. Extract content terms rather than using the final
         # word (which may be "Islam", "religion", etc.). These passages
         # are still subject to evidence, scope, and relevance verification.
-        if re.match(r"(?i)^\s*(?:what is|what are|define|explain|describe)\b", retrieval_query):
+        if not definition_topic and re.match(r"(?i)^\s*(?:what is|what are|define|explain|describe)\b", retrieval_query):
             stopwords = {
                 "what", "which", "where", "when", "about", "islam", "islamic",
                 "religion", "meaning", "definition", "please", "explain",
