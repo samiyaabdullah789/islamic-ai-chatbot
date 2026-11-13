@@ -11,14 +11,15 @@ from app.core.config import settings
 
 class RAGReranker:
     """
-    Generic heuristic reranker.
+    Generic intent-aware heuristic reranker.
 
-    Uses:
-    - Semantic retrieval distance
-    - Question and answer keyword coverage
+    Scores:
+    - Semantic retrieval similarity
+    - Main subject coverage
+    - Question intent relevance
+    - Question/answer text coverage
     - Metadata relevance
-    - Topic coverage
-    - Near-duplicate filtering
+    - Passage diversity
     """
 
     STOP_WORDS = {
@@ -54,12 +55,57 @@ class RAGReranker:
         {"permissible", "allowed", "halal"},
         {"forbidden", "prohibited", "haram"},
         {"marriage", "nikah", "nikkah"},
+        {"backbiting", "gheebah", "gheebat"},
+        {"anger", "angry", "wrath"},
+        {"hypocrite", "hypocrisy", "munafiq"},
     )
 
+    # Intent signals are generic, not tied to a
+    # particular religious topic or answer.
+    INTENT_GROUPS = {
+        "importance": {
+            "importance", "important", "significance",
+            "benefit", "benefits", "virtue", "virtues",
+            "value", "reward", "rewards", "merit",
+            "merits", "status", "rank", "essential",
+        },
+        "definition": {
+            "define", "definition", "meaning",
+            "means", "mean", "refers", "called",
+            "known", "described",
+        },
+        "obligation": {
+            "obligatory", "obligation", "mandatory",
+            "compulsory", "required", "requirement",
+            "must", "duty", "duties", "fard",
+            "farz", "wajib", "enjoined", "commanded",
+        },
+        "method": {
+            "perform", "performed", "procedure",
+            "steps", "step", "method", "manner",
+            "way", "practice", "practiced",
+        },
+        "prohibition": {
+            "forbidden", "prohibited", "haram",
+            "avoid", "avoiding", "sin", "sins",
+            "sinful", "unlawful",
+        },
+        "permission": {
+            "permissible", "allowed", "halal",
+            "permitted", "lawful",
+        },
+        "consequence": {
+            "punishment", "consequence", "consequences",
+            "warning", "warned", "danger", "harm",
+            "accountability",
+        },
+    }
+
     WINDOW_SIZE = 60
+    DUPLICATE_THRESHOLD = 0.88
+
     TOPIC_WEIGHT = 0.75
     NO_TOPIC_PENALTY = 0.35
-    DUPLICATE_THRESHOLD = 0.88
 
     @staticmethod
     def _token_list(text: str) -> list[str]:
@@ -68,7 +114,6 @@ class RAGReranker:
         ).casefold()
 
         text = text.replace("’", "'")
-
         return re.findall(r"[^\W_]+", text)
 
     @classmethod
@@ -91,6 +136,68 @@ class RAGReranker:
         )[0]
 
         return focused.strip(" \t\n.!?") or question
+
+    @classmethod
+    def _detect_intent(cls, question: str) -> str:
+        words = cls.tokenize(question)
+
+        patterns = (
+            (
+                "importance",
+                r"\b(?:importance|important|"
+                r"significance|benefits?|virtues?|"
+                r"rewards?|merits?)\b",
+            ),
+            (
+                "obligation",
+                r"\b(?:obligatory|obligation|"
+                r"mandatory|compulsory|required|"
+                r"must|fard|farz|wajib)\b",
+            ),
+            (
+                "prohibition",
+                r"\b(?:forbidden|prohibited|"
+                r"haram|sinful|unlawful)\b",
+            ),
+            (
+                "permission",
+                r"\b(?:permissible|allowed|"
+                r"halal|permitted|lawful)\b",
+            ),
+            (
+                "method",
+                r"\b(?:how to|how do|how did|"
+                r"steps|procedure|method|"
+                r"perform|performed)\b",
+            ),
+            (
+                "definition",
+                r"\b(?:what is|what are|define|"
+                r"definition|meaning|what does)\b",
+            ),
+            (
+                "consequence",
+                r"\b(?:punishment|consequences?|"
+                r"warnings?|harm)\b",
+            ),
+        )
+
+        normalized = " ".join(
+            cls._token_list(question)
+        )
+
+        for intent, pattern in patterns:
+            if re.search(pattern, normalized):
+                return intent
+
+        if words & {"why"}:
+            return "importance"
+
+        return "general"
+
+    @classmethod
+    def _intent_terms(cls, intent: str) -> set[str]:
+        return set(cls.INTENT_GROUPS.get(intent, set()))
 
     def get_concepts(
         self,
@@ -120,13 +227,29 @@ class RAGReranker:
 
         return concepts
 
-    def _topic_concepts(
+    def _subject_concepts(
         self,
         question: str,
     ) -> list[set[str]]:
-        return self.get_concepts(
-            self._focused_question(question)
-        )
+        """
+        Remove intent terms so topic matching
+        is not confused with answer intent.
+        """
+        intent = self._detect_intent(question)
+        words = self.tokenize(question) - self.STOP_WORDS
+
+        intent_vocabulary = set()
+        for group in self.INTENT_GROUPS.values():
+            intent_vocabulary.update(group)
+
+        # Remove common intent words, but keep
+        # any remaining subject-specific concepts.
+        words -= intent_vocabulary
+
+        if not words:
+            return self.get_concepts(question)
+
+        return self.get_concepts(" ".join(sorted(words)))
 
     @staticmethod
     def _coverage(
@@ -142,26 +265,6 @@ class RAGReranker:
         )
 
         return matched / len(concepts)
-
-    def _topic_coverage(
-        self,
-        question: str,
-        document: dict,
-    ) -> float:
-        concepts = self._topic_concepts(question)
-
-        metadata = document.get("metadata") or {}
-
-        text = " ".join([
-            str(document.get("content") or ""),
-            str(metadata.get("category") or ""),
-            str(metadata.get("tags") or ""),
-        ])
-
-        return self._coverage(
-            concepts,
-            self.tokenize(text),
-        )
 
     @staticmethod
     def _split_sections(
@@ -179,7 +282,7 @@ class RAGReranker:
                 match.group(2).strip(),
             )
 
-        return "", str(content).strip()
+        return "", str(content or "").strip()
 
     def _best_window_coverage(
         self,
@@ -248,6 +351,64 @@ class RAGReranker:
             for pattern in patterns
         )
 
+    def _topic_coverage(
+        self,
+        question: str,
+        document: dict,
+    ) -> float:
+        concepts = self._subject_concepts(question)
+        metadata = document.get("metadata") or {}
+
+        content = " ".join([
+            str(document.get("content") or ""),
+            str(metadata.get("category") or ""),
+            str(metadata.get("tags") or ""),
+        ])
+
+        return self._coverage(
+            concepts,
+            self.tokenize(content),
+        )
+
+    def _intent_relevance(
+        self,
+        question: str,
+        document: dict,
+    ) -> float:
+        """
+        Estimate whether the passage addresses
+        the question's requested intent.
+
+        This is a ranking signal, not a
+        substitute for evidence verification.
+        """
+        intent = self._detect_intent(question)
+
+        if intent == "general":
+            return 0.0
+
+        content = str(document.get("content") or "")
+        metadata = document.get("metadata") or {}
+
+        text = " ".join([
+            content,
+            str(metadata.get("category") or ""),
+            str(metadata.get("tags") or ""),
+        ])
+
+        tokens = self.tokenize(text)
+        terms = self._intent_terms(intent)
+
+        if not terms:
+            return 0.0
+
+        matched = len(tokens & terms)
+        if matched == 0:
+            return 0.0
+
+        # Saturate after two distinct intent terms.
+        return min(1.0, matched / 2.0)
+
     def _score(
         self,
         document: dict,
@@ -314,10 +475,7 @@ class RAGReranker:
                 "meaning", "means", "refers",
             }
 
-            if (
-                self.tokenize(answer_text)
-                & definition_terms
-            ):
+            if self.tokenize(answer_text) & definition_terms:
                 score += 0.25
 
         return score
@@ -338,7 +496,6 @@ class RAGReranker:
         candidate_text = str(
             candidate.get("content") or ""
         )
-
         selected_text = str(
             selected.get("content") or ""
         )
@@ -346,13 +503,8 @@ class RAGReranker:
         if not candidate_text or not selected_text:
             return False
 
-        candidate_tokens = self.tokenize(
-            candidate_text
-        )
-
-        selected_tokens = self.tokenize(
-            selected_text
-        )
+        candidate_tokens = self.tokenize(candidate_text)
+        selected_tokens = self.tokenize(selected_text)
 
         if not candidate_tokens or not selected_tokens:
             return False
@@ -360,7 +512,6 @@ class RAGReranker:
         intersection = len(
             candidate_tokens & selected_tokens
         )
-
         union = len(
             candidate_tokens | selected_tokens
         )
@@ -395,42 +546,28 @@ class RAGReranker:
             if len(selected) >= limit:
                 return selected
 
-        # Fill remaining slots if diversity filtering
-        # leaves fewer passages than requested.
-        for document in ranked:
-            doc_id = self._duplicate_key(document)
-
-            if doc_id in selected_ids:
-                continue
-
-            selected.append(document)
-            selected_ids.add(doc_id)
-
-            if len(selected) >= limit:
-                break
-
+        # Do not reintroduce near-duplicates.
         return selected
 
-    async def rerank(
+    def _build_heuristic_scores(
         self,
         question: str,
         documents: list[dict],
-        limit: int = 5,
     ) -> list[dict]:
-        start = time.perf_counter()
-
-        if not documents or limit <= 0:
-            return []
-
         focused = self._focused_question(question)
         concepts = self.get_concepts(focused)
-
         definition_question = (
             self._is_definition_question(focused)
+            and self._detect_intent(focused) == "definition"
         )
 
         topic_scores = [
             self._topic_coverage(focused, document)
+            for document in documents
+        ]
+
+        intent_scores = [
+            self._intent_relevance(focused, document)
             for document in documents
         ]
 
@@ -440,8 +577,10 @@ class RAGReranker:
 
         scored = []
 
-        for document, topic_score in zip(
-            documents, topic_scores
+        for document, topic_score, intent_score in zip(
+            documents,
+            topic_scores,
+            intent_scores,
         ):
             base_score = self._score(
                 document,
@@ -459,12 +598,43 @@ class RAGReranker:
                 else:
                     final_score -= self.NO_TOPIC_PENALTY
 
+            # Intent is a bounded supporting signal.
+            # It cannot by itself establish relevance.
+            final_score += 0.5 * intent_score * topic_score
+
             scored.append({
                 **document,
                 "heuristic_score": base_score,
                 "topic_score": topic_score,
+                "intent_score": intent_score,
                 "rerank_score": final_score,
             })
+
+        return scored
+
+    async def rerank(
+        self,
+        question: str,
+        documents: list[dict],
+        limit: int = 5,
+    ) -> list[dict]:
+        start = time.perf_counter()
+
+        if not documents or limit <= 0:
+            return []
+
+        focused = self._focused_question(question)
+        intent = self._detect_intent(focused)
+
+        print(
+            f"[RERANK] Detected intent: {intent}",
+            flush=True,
+        )
+
+        scored = self._build_heuristic_scores(
+            focused,
+            documents,
+        )
 
         scored.sort(
             key=lambda item: (
@@ -473,9 +643,7 @@ class RAGReranker:
             )
         )
 
-        selected = self._select_diverse(
-            scored, limit
-        )
+        selected = self._select_diverse(scored, limit)
 
         for index, document in enumerate(
             selected, start=1
@@ -487,6 +655,7 @@ class RAGReranker:
                 f"source={metadata.get('source_name', 'Unknown')} | "
                 f"score={document['rerank_score']:.6f} | "
                 f"topic={document['topic_score']:.3f} | "
+                f"intent={document['intent_score']:.3f} | "
                 f"id={document.get('id')}",
                 flush=True,
             )
@@ -502,16 +671,15 @@ class RAGReranker:
 
 class CrossEncoderReranker:
     """
-    Hybrid reranker.
+    Hybrid reranker combining:
+    - CrossEncoder
+    - Heuristic scores
+    - Topic coverage
+    - Intent relevance
+    - Reciprocal rank fusion
+    - Near-duplicate filtering
 
-    Combines:
-    1. CrossEncoder relevance
-    2. Heuristic relevance
-    3. Topic coverage
-    4. Reciprocal rank fusion
-    5. Near-duplicate filtering
-
-    Final evidence verification remains in RAGPipeline.
+    Final claim verification remains in RAGPipeline.
     """
 
     FUSION_K = 60
@@ -519,9 +687,9 @@ class CrossEncoderReranker:
     CROSS_ENCODER_WEIGHT = 1.5
     HEURISTIC_WEIGHT = 1.0
 
-    # Modest adjustments relative to fusion scores.
     TOPIC_WEIGHT = 0.004
     NO_TOPIC_PENALTY = 0.002
+    INTENT_WEIGHT = 0.006
 
     def __init__(self):
         self._model = None
@@ -533,9 +701,7 @@ class CrossEncoderReranker:
             if self._model is None:
                 start = time.perf_counter()
 
-                from sentence_transformers import (
-                    CrossEncoder,
-                )
+                from sentence_transformers import CrossEncoder
 
                 self._model = CrossEncoder(
                     settings.RERANKER_MODEL,
@@ -553,9 +719,7 @@ class CrossEncoderReranker:
 
     @staticmethod
     def _focused_question(question: str) -> str:
-        return RAGReranker._focused_question(
-            question
-        )
+        return RAGReranker._focused_question(question)
 
     def _score(
         self,
@@ -573,7 +737,6 @@ class CrossEncoderReranker:
         ]
 
         start = time.perf_counter()
-
         predictions = model.predict(pairs)
 
         print(
@@ -625,17 +788,21 @@ class CrossEncoderReranker:
         if not documents or limit <= 0:
             return []
 
-        focused_question = (
-            self._focused_question(question)
+        focused_question = self._focused_question(question)
+        intent = self._heuristic._detect_intent(
+            focused_question
         )
 
         print(
             f"[RERANK] Original query: {question}",
             flush=True,
         )
-
         print(
             f"[RERANK] Focused query: {focused_question}",
+            flush=True,
+        )
+        print(
+            f"[RERANK] Detected intent: {intent}",
             flush=True,
         )
 
@@ -645,37 +812,30 @@ class CrossEncoderReranker:
             documents,
         )
 
-        concepts = self._heuristic.get_concepts(
-            focused_question
-        )
-
-        definition_question = (
-            self._heuristic._is_definition_question(
-                focused_question
+        heuristic_documents = (
+            self._heuristic._build_heuristic_scores(
+                focused_question,
+                documents,
             )
         )
 
         heuristic_scores = [
-            self._heuristic._score(
-                document,
-                concepts,
-                definition_question,
-            )
-            for document in documents
+            document["rerank_score"]
+            for document in heuristic_documents
         ]
 
         topic_scores = [
-            self._heuristic._topic_coverage(
-                focused_question,
-                document,
-            )
-            for document in documents
+            document["topic_score"]
+            for document in heuristic_documents
+        ]
+
+        intent_scores = [
+            document["intent_score"]
+            for document in heuristic_documents
         ]
 
         cross_ranks = self._ranks(cross_scores)
-        heuristic_ranks = self._ranks(
-            heuristic_scores
-        )
+        heuristic_ranks = self._ranks(heuristic_scores)
 
         has_topic_matches = any(
             score > 0 for score in topic_scores
@@ -692,6 +852,8 @@ class CrossEncoderReranker:
             )
 
             topic_score = topic_scores[index]
+            intent_score = intent_scores[index]
+
             final_score = fusion_score
 
             if has_topic_matches:
@@ -700,27 +862,26 @@ class CrossEncoderReranker:
                         self.TOPIC_WEIGHT * topic_score
                     )
                 else:
-                    final_score -= (
-                        self.NO_TOPIC_PENALTY
-                    )
+                    final_score -= self.NO_TOPIC_PENALTY
+
+            # Require some subject overlap before
+            # rewarding an intent keyword.
+            final_score += (
+                self.INTENT_WEIGHT
+                * intent_score
+                * topic_score
+            )
 
             scored.append({
                 **document,
                 "rerank_score": final_score,
                 "fusion_score": fusion_score,
-                "cross_encoder_score": (
-                    cross_scores[index]
-                ),
-                "heuristic_score": (
-                    heuristic_scores[index]
-                ),
+                "cross_encoder_score": cross_scores[index],
+                "heuristic_score": heuristic_scores[index],
                 "topic_score": topic_score,
-                "cross_encoder_rank": (
-                    cross_ranks[index]
-                ),
-                "heuristic_rank": (
-                    heuristic_ranks[index]
-                ),
+                "intent_score": intent_score,
+                "cross_encoder_rank": cross_ranks[index],
+                "heuristic_rank": heuristic_ranks[index],
             })
 
         scored.sort(
@@ -741,7 +902,8 @@ class CrossEncoderReranker:
             flush=True,
         )
 
-        for document in scored:
+        # Limit debug output to avoid huge logs.
+        for document in scored[:20]:
             print(
                 f"[RERANK DEBUG] "
                 f"id={document.get('id')} | "
@@ -750,14 +912,14 @@ class CrossEncoderReranker:
                 f"cross={document['cross_encoder_score']:.6f} | "
                 f"heuristic={document['heuristic_score']:.4f} | "
                 f"topic={document['topic_score']:.3f} | "
+                f"intent={document['intent_score']:.3f} | "
                 f"cross_rank={document['cross_encoder_rank']} | "
                 f"heuristic_rank={document['heuristic_rank']}",
                 flush=True,
             )
 
         for index, document in enumerate(
-            selected,
-            start=1,
+            selected, start=1
         ):
             metadata = document.get("metadata") or {}
 
@@ -767,6 +929,7 @@ class CrossEncoderReranker:
                 f"madhhab={metadata.get('madhhab', 'N/A')} | "
                 f"score={document['rerank_score']:.6f} | "
                 f"topic={document['topic_score']:.3f} | "
+                f"intent={document['intent_score']:.3f} | "
                 f"id={document.get('id')}",
                 flush=True,
             )
