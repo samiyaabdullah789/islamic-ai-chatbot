@@ -1147,6 +1147,8 @@ class RAGPipeline:
             if not isinstance(entry, dict):
                 return False
             identifier = entry.get("id")
+            if isinstance(identifier, str) and identifier.strip().isdigit():
+                identifier = int(identifier.strip())
             if type(identifier) is not int or identifier in verdicts:
                 return False
             if type(entry.get("relevant")) is not bool:
@@ -1282,8 +1284,9 @@ class RAGPipeline:
                 rotated = passages[1:] + passages[:1]
                 votes.append(await compare(rotated, 3))
         except (ValueError, TypeError, KeyError) as error:
-            print(f"[RAG SELECT] Selection failed: {error}", flush=True)
-            return []
+            print(f"[RAG SELECT] Selection failed: {error}; "
+                  "passing reranked evidence to strict verification", flush=True)
+            return passages
         finally:
             print(
                 f"[TIMING] Evidence selection: {time.perf_counter() - start:.2f}s",
@@ -1308,8 +1311,9 @@ class RAGPipeline:
                     flush=True,
                 )
             else:
-                print("[RAG SELECT] No usable consensus", flush=True)
-                return []
+                print("[RAG SELECT] No consensus; passing reranked "
+                      "evidence to strict verification", flush=True)
+                return passages
         chosen = [primary]
         # A majority vote can repeatedly prefer a related anecdote over
         # the highest-ranked direct answer. Preserve the top reranked
@@ -1337,6 +1341,7 @@ class RAGPipeline:
                 and support_votes.get(p["source_index"], 0) >= 2
             )
         passage_map = {p["source_index"]: p for p in passages}
+        chosen = list(dict.fromkeys(chosen))
         print(f"[RAG SELECT] Majority evidence indexes: {chosen}", flush=True)
         return [passage_map[index] for index in chosen]
     @staticmethod
@@ -1525,6 +1530,14 @@ class RAGPipeline:
                 r"\s+(?:in islam|according to islam|in the religion of islam)\s*$",
                 "", match.group(1), flags=re.I,
             ).strip(" ?.!")
+            # 'What is the importance of Salah?' is an explanatory
+            # question, not a request to define 'importance of Salah'.
+            if re.match(
+                r"^(?:importance|significance|benefits?|virtues?|"
+                r"rewards?|rulings?|status|role|purpose)\s+of\b",
+                topic, re.I,
+            ):
+                return None
             if 2 <= len(topic) <= 65 and len(topic.split()) <= 7:
                 return topic
         return None
@@ -1941,7 +1954,7 @@ class RAGPipeline:
         # claims that were never sent to the verifier.
         valid_quote_count = len(verified_claims)
         supported_count = len(kept_claims)
-        supported_ratio = supported_count / max(generated_count, 1)
+        supported_ratio = supported_count / max(valid_quote_count, 1)
         print(
             f"[RAG] Validation summary: "
             f"generated={generated_count} | "
