@@ -1,5 +1,5 @@
 
-"""Hybrid Chroma semantic + BM25 retrieval using RRF."""
+"""Hybrid Chroma semantic + BM25 retrieval using weighted RRF."""
 
 import math
 import os
@@ -25,17 +25,108 @@ class RAGRetriever:
         "islam", "islamic",
     }
 
+    # Search terminology, not religious rulings or fixed answers.
+    # Each group contains closely related search expressions.
+    SYNONYM_GROUPS = (
+        ("namaz", "salah", "salat", "prayer"),
+        ("roza", "sawm", "siyam", "fasting"),
+        ("zakat", "zakah", "almsgiving"),
+        ("wudu", "wudhu", "wuzu", "ablution"),
+        ("ghusl", "ritual bath"),
+        ("backbiting", "gheebah", "gheebat"),
+        ("anger", "angry", "wrath"),
+        ("hypocrite", "hypocrisy", "munafiq"),
+    )
+
     RRF_K = 60
     SEMANTIC_POOL = 40
     KEYWORD_POOL = 40
+
+    # Original question should remain the strongest signal.
+    ORIGINAL_QUERY_WEIGHT = 1.0
+    SIMPLIFIED_QUERY_WEIGHT = 0.75
+    EXPANDED_QUERY_WEIGHT = 0.55
+
+    # Prevent too many embedding and Chroma calls.
+    MAX_SEARCH_QUERIES = 3
 
     @staticmethod
     def _normalize(text: str) -> str:
         return " ".join(
             unicodedata.normalize(
-                "NFKC", str(text)
+                "NFKC", str(text or "")
             ).strip().split()
         )
+
+    @staticmethod
+    def _tokens(text: str) -> list[str]:
+        return re.findall(
+            r"[^\W_]+",
+            unicodedata.normalize(
+                "NFKC", str(text or "")
+            ).casefold(),
+            flags=re.UNICODE,
+        )
+
+    @classmethod
+    def _expand_terms(cls, query: str) -> str:
+        """
+        Expand recognized terminology without changing the
+        original question or adding factual answers.
+        """
+        normalized = cls._normalize(query)
+        words = set(cls._tokens(normalized))
+
+        additions = []
+
+        for group in cls.SYNONYM_GROUPS:
+            matched = False
+
+            for expression in group:
+                expression_words = cls._tokens(expression)
+
+                if len(expression_words) == 1:
+                    if expression_words[0] in words:
+                        matched = True
+                        break
+                else:
+                    pattern = (
+                        r"(?<!\w)"
+                        + re.escape(expression.casefold())
+                        + r"(?!\w)"
+                    )
+                    if re.search(
+                        pattern,
+                        normalized.casefold(),
+                    ):
+                        matched = True
+                        break
+
+            if not matched:
+                continue
+
+            for expression in group:
+                if expression.casefold() not in {
+                    item.casefold() for item in additions
+                }:
+                    additions.append(expression)
+
+        if not additions:
+            return ""
+
+        # Focus on the user's original terms plus a small
+        # number of related expressions.
+        core = [
+            word
+            for word in cls._tokens(normalized)
+            if word not in cls.QUERY_FILLER_WORDS
+        ]
+
+        expanded = " ".join(
+            core + additions[:8]
+        )
+
+        return cls._normalize(expanded)
 
     def build_search_queries(
         self,
@@ -46,29 +137,43 @@ class RAGRetriever:
         if not original:
             return []
 
-        words = re.findall(
-            r"[^\W_]+",
-            original,
-            flags=re.UNICODE,
-        )
+        words = self._tokens(original)
 
         core = [
-            word for word in words
-            if word.casefold()
-            not in self.QUERY_FILLER_WORDS
+            word
+            for word in words
+            if word not in self.QUERY_FILLER_WORDS
         ]
 
         simplified = " ".join(core)
+        expanded = self._expand_terms(original)
 
-        if (
-            len(core) >= 2
+        candidates = [
+            original,
+            simplified
+            if len(core) >= 2
             and len(simplified) >= 8
-            and simplified.casefold()
-            != " ".join(words).casefold()
-        ):
-            return [original, simplified]
+            else "",
+            expanded,
+        ]
 
-        return [original]
+        queries = []
+        seen = set()
+
+        for candidate in candidates:
+            candidate = self._normalize(candidate)
+            key = candidate.casefold()
+
+            if not candidate or key in seen:
+                continue
+
+            seen.add(key)
+            queries.append(candidate)
+
+            if len(queries) >= self.MAX_SEARCH_QUERIES:
+                break
+
+        return queries
 
     @staticmethod
     def is_clearly_general_question(
@@ -134,6 +239,7 @@ class RAGRetriever:
         results: dict,
         query_index: int,
     ) -> list[dict]:
+
         if not isinstance(results, dict):
             raise ValueError(
                 "Invalid ChromaDB search response"
@@ -206,6 +312,7 @@ class RAGRetriever:
         madhhab: str | None,
         general_question: bool,
     ) -> dict | None:
+
         conditions = []
 
         if source_id is not None:
@@ -235,11 +342,21 @@ class RAGRetriever:
         rankings: list[list[dict]],
         limit: int,
         k: int,
+        weights: list[float] | None = None,
     ) -> list[dict]:
+
         scores = {}
         documents = {}
 
-        for ranking in rankings:
+        if weights is None:
+            weights = [1.0] * len(rankings)
+
+        if len(weights) != len(rankings):
+            raise ValueError(
+                "Rankings and weights count mismatch"
+            )
+
+        for ranking, weight in zip(rankings, weights):
             seen_in_ranking = set()
 
             for rank, document in enumerate(
@@ -254,7 +371,7 @@ class RAGRetriever:
 
                 scores[doc_id] = (
                     scores.get(doc_id, 0.0)
-                    + 1.0 / (k + rank)
+                    + weight / (k + rank)
                 )
 
                 previous = documents.get(doc_id)
@@ -293,6 +410,7 @@ class RAGRetriever:
         madhhab: str | None = None,
         general_question: bool = False,
     ) -> list[dict]:
+
         total_start = time.perf_counter()
 
         if limit <= 0:
@@ -325,8 +443,13 @@ class RAGRetriever:
             f"[RAG] ChromaDB filter: {where_filter}",
             flush=True,
         )
+        print(
+            f"[RAG] Search queries: {queries}",
+            flush=True,
+        )
 
         rankings = []
+        weights = []
 
         semantic_pool = max(
             limit, self.SEMANTIC_POOL
@@ -335,12 +458,37 @@ class RAGRetriever:
             limit, self.KEYWORD_POOL
         )
 
+        original_tokens = self._tokens(query)
+
+        simplified_tokens = [
+            word
+            for word in original_tokens
+            if word not in self.QUERY_FILLER_WORDS
+        ]
+
+        simplified_text = " ".join(simplified_tokens)
+
         for query_index, search_query in enumerate(
             queries
         ):
+
+            if query_index == 0:
+                query_weight = self.ORIGINAL_QUERY_WEIGHT
+                query_type = "original"
+            elif (
+                search_query.casefold()
+                == simplified_text.casefold()
+            ):
+                query_weight = self.SIMPLIFIED_QUERY_WEIGHT
+                query_type = "simplified"
+            else:
+                query_weight = self.EXPANDED_QUERY_WEIGHT
+                query_type = "expanded"
+
             print(
-                f"[RAG] Search query "
-                f"{query_index + 1}: {search_query}",
+                f"[RAG] Search query {query_index + 1} "
+                f"({query_type}, weight={query_weight}): "
+                f"{search_query}",
                 flush=True,
             )
 
@@ -384,6 +532,7 @@ class RAGRetriever:
                     ),
                 )
             )
+            weights.append(query_weight)
 
             print(
                 f"[TIMING] Query {query_index + 1} "
@@ -410,6 +559,7 @@ class RAGRetriever:
                 )
 
                 rankings.append(lexical)
+                weights.append(query_weight)
 
                 print(
                     f"[RAG] Query {query_index + 1} "
@@ -438,6 +588,7 @@ class RAGRetriever:
                 semantic_pool + keyword_pool,
             ),
             k=self.RRF_K,
+            weights=weights,
         )
 
         print(
@@ -471,3 +622,4 @@ class RAGRetriever:
 
 
 rag_retriever = RAGRetriever()
+
