@@ -9,6 +9,7 @@ from app.rag.reranker import rag_reranker
 from app.llm.client import ollama_client
 class RAGPipeline:
     MAX_PASSAGES = 5
+    EVIDENCE_CANDIDATE_POOL = 12
     MAX_CLAIMS = 8
     MAX_CLAIM_CHARS = 700
     RETRIEVAL_LIMIT = 20
@@ -1667,7 +1668,7 @@ class RAGPipeline:
         documents = await rag_reranker.rerank(
             retrieval_query,
             documents,
-            limit=(12 if definition_topic else self.MAX_PASSAGES),
+            limit=self.EVIDENCE_CANDIDATE_POOL,
         )
         if definition_topic:
             prepared = self._prepare_passages(documents)
@@ -1679,7 +1680,7 @@ class RAGPipeline:
                 p["document"] for p in prepared
                 if self._is_subtype_only_passage(definition_topic, p)
             ]
-            documents = (generic + subtype)[:self.MAX_PASSAGES]
+            documents = (generic + subtype)[:self.EVIDENCE_CANDIDATE_POOL]
         print(
             "[TIMING] Reranking: "
             f"{time.perf_counter() - start:.2f}s",
@@ -1691,9 +1692,9 @@ class RAGPipeline:
                 self.MISSING_MESSAGE,
             )
         self._log_documents(
-            "Selected passages (after rerank, sent to LLM)",
+            "Reranked evidence candidates (before selection)",
             documents,
-            self.MAX_PASSAGES,
+            self.EVIDENCE_CANDIDATE_POOL,
         )
         passages = self._prepare_passages(
             documents
@@ -1764,6 +1765,21 @@ class RAGPipeline:
                     f"{[p['source_index'] for p in extras]}", flush=True,
                 )
                 passages.extend(extras)
+        # Keep a wider candidate pool for evidence comparison, but do not
+        # enlarge the generation prompt beyond the established passage limit.
+        # Every selected claim still passes exact-quote verification and audit.
+        if len(passages) > self.MAX_PASSAGES:
+            print(
+                f"[RAG SELECT] Limiting generation evidence from "
+                f"{len(passages)} to {self.MAX_PASSAGES} passages",
+                flush=True,
+            )
+            passages = passages[:self.MAX_PASSAGES]
+        self._log_documents(
+            "Final passages sent to generation",
+            [p["document"] for p in passages],
+            self.MAX_PASSAGES,
+        )
         source_context_parts = []
         for passage in passages:
             metadata = passage["metadata"]
