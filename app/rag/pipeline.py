@@ -214,6 +214,21 @@ class RAGPipeline:
         )
         if normalized.startswith(starts):
             return True
+        # Ordinal and elliptical follow-ups can be longer than five words.
+        # Resolve them from the conversation rather than searching literally.
+        if re.search(
+            r"\b(?:first|second|third|fourth|fifth|sixth|seventh|"
+            r"eighth|ninth|tenth|last|previous|former|latter|"
+            r"1st|2nd|3rd|[4-9]th)\s+(?:one|item|point|pillar|part)\b",
+            normalized,
+        ):
+            return True
+        if re.search(
+            r"\b(?:explain|elaborate|expand on|tell me more about)\b"
+            r".{0,70}\b(?:one|it|that|this|them|those)\b",
+            normalized,
+        ):
+            return True
         words = re.findall(
             r"\b\w+\b",
             normalized,
@@ -345,7 +360,8 @@ class RAGPipeline:
                     "content": (
                         "Rewrite the user's follow-up as "
                         "one standalone English search query. "
-                        "Replace pronouns and vague references "
+                        "Replace pronouns, ordinal references "
+                        "(the third one, the second point), and vague references "
                         "(it, that, they) with the specific topic "
                         "they refer to in the history, usually the "
                         "most recent user question. "
@@ -1102,10 +1118,19 @@ class RAGPipeline:
             "verification. Do not repeat general factual verification; "
             "check whether each claim actually answers the exact question. "
             "A true statement about a related subject is NOT relevant. "
+            "First identify the requested answer type: count, name, "
+            "definition, ruling, list, explanation, or other. "
+            "For a how-many question, the claims must explicitly provide "
+            "the requested count for the requested subject. Numbers about "
+            "a related activity or its subparts do not count. "
+            "For a who/which/when question, the claims must supply the "
+            "requested identity or time. Reject a topical discussion "
+            "that omits the requested fact. "
             "Reject changed attribution, reversed meaning, or a different "
             "person, event, action, or consequence. "
             "For a narrow factual question, one directly answering claim "
-            "is sufficient. Do not require the entire source to be summarized. "
+            "is sufficient, but merely related claims are not. "
+            "Do not require the entire source to be summarized. "
             "A question asking for tafsir, interpretation, or explanation "
             "of a text is not answered merely by its virtues or rewards. "
             "For a broad explanatory request, a single isolated detail may "
@@ -1452,6 +1477,14 @@ class RAGPipeline:
             "Islamic facts, rulings, or references.\n"
             "4. Never invent or assume missing information.\n"
             "5. Read the user's exact question carefully.\n"
+            "5a. Identify what the question explicitly asks for (a number, "
+            "name, definition, ruling, list, reason, or explanation). "
+            "State that requested information directly in the first claim, "
+            "only if the supplied evidence supports it. For a how-many "
+            "question, do not substitute examples, units, or descriptions "
+            "for the requested count. Do not confuse the number of daily "
+            "prayers with the number of rakats, or analogous quantities "
+            "in other topics. If the exact answer is absent, return no claims.\n"
             "6. Read the source question AND source answer.\n"
             "7. Check whether the source actually answers "
             "the user's specific question.\n"
