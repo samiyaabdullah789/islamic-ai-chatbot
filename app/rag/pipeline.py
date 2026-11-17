@@ -1069,13 +1069,14 @@ class RAGPipeline:
             "answers_question": answers_question,
         }
     async def _audit_answer_relevance(self, question, claims, passages):
-        """Independent, comparative check of answer relevance.
-        The initial verifier only sees cited passages. This audit also
-        sees competing retrieved evidence, making unrelated-but-true
-        quotations easier to detect. Fail closed on invalid output.
+        """Independently audit relevance without trusting malformed model output.
+
+        Retry one time on malformed output or an internal relevance/sufficiency
+        disagreement. Never convert an invalid or negative audit into a pass.
         """
         if not claims or not passages:
             return False
+
         evidence_blocks = []
         for passage in passages:
             answer = str(passage["source_answer"])[:self.VERIFIER_PASSAGE_CHARS]
@@ -1085,6 +1086,7 @@ class RAGPipeline:
                 f"Source question: {source_question or '(none)'}\n"
                 f"Source answer: {answer}"
             )
+
         claim_blocks = []
         for i, claim in enumerate(claims, 1):
             claim_blocks.append(
@@ -1092,107 +1094,149 @@ class RAGPipeline:
                 f"Claim: {claim['text']}\n"
                 f"Exact source quote: {claim['quote']}"
             )
+
         system = (
-            "You are an independent relevance auditor. Do NOT answer the "
-            "question or use outside knowledge. Decide whether EACH claim "
-            "directly answers the user's precise question, not merely "
-            "whether it is a true quotation from a source. Also reject "
-            "misleading attribution, inverted negation, or claims that "
-            "change who a quoted statement refers to. A single narrow "
-            "example is not automatically a complete answer to a broad "
-            "explanatory question. Compare the "
-            "cited passage with ALL available passages. A claim about a "
-            "different event, person, reward, or subject is NOT an answer "
-            "even if it shares keywords with the question. Distinguish "
-            "what the question asks from what a source actually says. "
-            "For each claim, return relevant=true only if its cited source "
-            "directly supports an answer to the question. Distinguish "
-            "source support from relevance: separate teachings in one "
-            "hadith need not all be included. Judge overall sufficiency "
-            "against what the question actually requests, not whether "
-            "every detail of the passage is repeated. When uncertain, "
-            "return false. Do not prefer a passage merely because it is "
-            "first in the list. Return JSON only in this form: "
+            "You are an independent question-relevance auditor. "
+            "Use ONLY the question, claims, and cited source passages. "
+            "The claims have already undergone a separate factual-support "
+            "verification. Do not repeat general factual verification; "
+            "check whether each claim actually answers the exact question. "
+            "A true statement about a related subject is NOT relevant. "
+            "Reject changed attribution, reversed meaning, or a different "
+            "person, event, action, or consequence. "
+            "For a narrow factual question, one directly answering claim "
+            "is sufficient. Do not require the entire source to be summarized. "
+            "For a broad explanatory request, a single isolated detail may "
+            "be insufficient unless the answer explicitly states its limits. "
+            "Do not infer missing facts or use outside religious knowledge. "
+            "Return exactly one entry for EACH numbered claim, with IDs "
+            "1 through the number of claims, no missing or extra entries. "
+            "Return JSON only, in the shape: "
             '{"claims":[{"id":1,"relevant":true}],"answers_question":true}'
         )
         user = (
             f"EXACT USER QUESTION:\n{question}\n\n"
-            f"ALL RETRIEVED PASSAGES:\n{chr(10).join(evidence_blocks)}\n\n"
-            f"PROPOSED CLAIMS:\n{chr(10).join(claim_blocks)}\n\n"
-            "Audit the relevance of each claim independently. "
-            "answers_question must be true only if the relevant claims "
-            "collectively give a direct and sufficiently informative "
-            "answer to the question. A concise direct definition can "
-            "fully answer a narrow definition question; extra teachings "
-            "in the same source are not required. For broad requests, "
-            "an isolated example may be insufficient. If the available "
-            "evidence supports only a "
-            "partial answer, return false unless the claims explicitly "
-            "qualify that limitation."
+            f"AVAILABLE PASSAGES:\n{chr(10).join(evidence_blocks)}\n\n"
+            f"PROPOSED CLAIMS ({len(claims)} total):\n"
+            f"{chr(10).join(claim_blocks)}\n\n"
+            "Decide relevance for each claim independently. "
+            "Set answers_question=true only when the relevant claims, "
+            "together, directly and sufficiently answer the exact question. "
+            "A concise direct answer is sufficient for a narrow question."
         )
+
+        expected_ids = set(range(1, len(claims) + 1))
         start = time.perf_counter()
-        try:
-            raw = await ollama_client.generate(
-                [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                json_mode=True,
-                task="verify",
+        for attempt in (1, 2):
+            retry_instruction = (
+                "\n\nYour previous audit was invalid or internally inconsistent. "
+                f"Return exactly {len(claims)} numbered claim entries, "
+                "each with a boolean relevant value, and a boolean "
+                "answers_question. Judge sufficiency from the exact question; "
+                "do not reject a concise direct answer merely because the "
+                "source passage contains other information."
+                if attempt == 2 else ""
             )
-            result = self._parse_json(raw)
-        except (ValueError, TypeError, KeyError) as error:
-            print(f"[RAG AUDIT] Invalid relevance output: {error}", flush=True)
-            return False
+            try:
+                raw = await ollama_client.generate(
+                    [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user + retry_instruction},
+                    ],
+                    json_mode=True,
+                    task="verify",
+                )
+                if self.DEBUG_LOGGING:
+                    print(
+                        f"[RAG AUDIT] Attempt {attempt} raw output: "
+                        f"{str(raw)[:2500]}", flush=True,
+                    )
+                result = self._parse_json(raw)
+            except (ValueError, TypeError, KeyError) as error:
+                print(
+                    f"[RAG AUDIT] Attempt {attempt} invalid JSON: {error}",
+                    flush=True,
+                )
+                continue
+
+            entries = result.get("claims")
+            if not isinstance(entries, list) or len(entries) != len(claims):
+                print(
+                    f"[RAG AUDIT] Attempt {attempt}: expected "
+                    f"{len(claims)} claims, received "
+                    f"{len(entries) if isinstance(entries, list) else 'non-list'}",
+                    flush=True,
+                )
+                continue
+
+            verdicts = {}
+            valid = True
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    valid = False
+                    break
+                identifier = entry.get("id")
+                if isinstance(identifier, str) and identifier.strip().isdigit():
+                    identifier = int(identifier.strip())
+                if (
+                    type(identifier) is not int
+                    or identifier in verdicts
+                    or type(entry.get("relevant")) is not bool
+                ):
+                    valid = False
+                    break
+                verdicts[identifier] = entry["relevant"]
+
+            if not valid or set(verdicts) != expected_ids:
+                print(
+                    f"[RAG AUDIT] Attempt {attempt}: invalid claim IDs "
+                    "or relevance values", flush=True,
+                )
+                continue
+
+            overall = result.get("answers_question")
+            if type(overall) is not bool:
+                print(
+                    f"[RAG AUDIT] Attempt {attempt}: invalid "
+                    "answers_question value", flush=True,
+                )
+                continue
+
+            print(
+                f"[RAG AUDIT] Attempt {attempt}: claim relevance="
+                f"{verdicts} | answers_question={overall}",
+                flush=True,
+            )
+            if any(verdicts.values()) and not overall and attempt == 1:
+                print(
+                    "[RAG AUDIT] Relevant claim(s) but insufficient "
+                    "overall answer; requesting one independent recheck",
+                    flush=True,
+                )
+                continue
+
+            relevant_claims = [
+                claim for index, claim in enumerate(claims, start=1)
+                if verdicts[index]
+            ]
+            print(
+                "[TIMING] Independent relevance audit: "
+                f"{time.perf_counter() - start:.2f}s",
+                flush=True,
+            )
+            return {
+                "claims": relevant_claims,
+                "answers_question": overall and bool(relevant_claims),
+            }
+
         print(
-            f"[TIMING] Independent relevance audit: "
+            "[TIMING] Independent relevance audit: "
             f"{time.perf_counter() - start:.2f}s",
             flush=True,
         )
-        entries = result.get("claims")
-        if not isinstance(entries, list) or len(entries) != len(claims):
-            print("[RAG AUDIT] Missing or extra claim results", flush=True)
-            return False
-        verdicts = {}
-        for entry in entries:
-            if not isinstance(entry, dict):
-                return False
-            identifier = entry.get("id")
-            if isinstance(identifier, str) and identifier.strip().isdigit():
-                identifier = int(identifier.strip())
-            if type(identifier) is not int or identifier in verdicts:
-                return False
-            if type(entry.get("relevant")) is not bool:
-                return False
-            verdicts[identifier] = entry["relevant"]
-        expected = set(range(1, len(claims) + 1))
-        if set(verdicts) != expected:
-            return False
-        print(
-            f"[RAG AUDIT] Claim relevance: {verdicts} | "
-            f"answers_question={result.get('answers_question')}",
-            flush=True,
-        )
-        if result.get("answers_question") is not True and any(verdicts.values()):
-            print(
-                "[RAG AUDIT] Disagreement: individually relevant claims "
-                "did not satisfy overall answer sufficiency; "
-                "keeping strict rejection/retry behavior",
-                flush=True,
-            )
-        # Keep only claims independently judged relevant. The verifier has
-        # already checked their source quotes and factual support.
-        relevant_claims = [
-            claim for index, claim in enumerate(claims, start=1)
-            if verdicts[index]
-        ]
-        return {
-            "claims": relevant_claims,
-            "answers_question": (
-                result.get("answers_question") is True
-                and bool(relevant_claims)
-            ),
-        }
+        print("[RAG AUDIT] Audit unresolved after two attempts", flush=True)
+        return False
+
     @staticmethod
     def _question_needs_multiple_sources(question):
         """Detect explicit requests for a collection or comparison.
