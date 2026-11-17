@@ -694,7 +694,7 @@ class CrossEncoderReranker:
 
     FUSION_K = 60
 
-    CROSS_ENCODER_WEIGHT = 1.5
+    CROSS_ENCODER_WEIGHT = 2.5
     HEURISTIC_WEIGHT = 1.0
 
     TOPIC_WEIGHT = 0.004

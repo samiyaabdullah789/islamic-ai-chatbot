@@ -1380,22 +1380,21 @@ class RAGPipeline:
                 print("[RAG SELECT] No consensus; passing reranked "
                       "evidence to strict verification", flush=True)
                 return passages
+        # The selector is advisory, not a hard filter. Preserve several
+        # high-ranked alternatives so an erroneous majority cannot remove
+        # the strongest directly answering evidence before generation.
+        # The downstream quote, support, and relevance checks still apply.
         chosen = [primary]
-        # A majority vote can repeatedly prefer a related anecdote over
-        # the highest-ranked direct answer. Preserve the top reranked
-        # candidate for independent source-level verification. It is not
-        # automatically trusted or cited.
-        top_index = passages[0]["source_index"]
-        if top_index != primary:
-            chosen.insert(0, top_index)
-            print(
-                f"[RAG SELECT] Retaining top reranked alternative {top_index} "
-                f"alongside selected {primary}", flush=True,
-            )
+        for candidate in passages[:min(4, self.MAX_PASSAGES)]:
+            index = candidate["source_index"]
+            if index not in chosen:
+                chosen.append(index)
+        # A candidate nominated as primary by another ordering deserves
+        # consideration even if it lost the majority vote.
+        for voted_primary, _ in votes:
+            if voted_primary is not None and voted_primary not in chosen:
+                chosen.append(voted_primary)
         if multi:
-            # Supporting evidence is optional and must be nominated by
-            # at least two independent orderings. A primary-index tie
-            # should not discard agreement on other relevant passages.
             support_votes = {}
             for _, supporting in votes:
                 for index in supporting:
@@ -1408,7 +1407,9 @@ class RAGPipeline:
             )
         passage_map = {p["source_index"]: p for p in passages}
         chosen = list(dict.fromkeys(chosen))
-        print(f"[RAG SELECT] Majority evidence indexes: {chosen}", flush=True)
+        if len(chosen) > self.MAX_PASSAGES:
+            chosen = chosen[:self.MAX_PASSAGES]
+        print(f"[RAG SELECT] Candidate evidence indexes: {chosen}", flush=True)
         return [passage_map[index] for index in chosen]
     @staticmethod
     def _assemble_answer(claims):
