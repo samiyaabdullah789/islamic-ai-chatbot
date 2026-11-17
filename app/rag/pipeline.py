@@ -928,6 +928,9 @@ class RAGPipeline:
             "For EACH claim also return relevant: true ONLY when "
             "that individual claim directly helps answer the USER "
             "QUESTION. A claim can be supported but irrelevant. "
+            "A source may contain multiple separate teachings: a claim "
+            "about a different subject in the same hadith is not "
+            "automatically relevant to the user's question. "
             "Do not count unrelated prayer, travel, or other "
             "subject matter merely because a shared word appears. "
             "When unsure, set relevant to false.\n\n"
@@ -1103,7 +1106,11 @@ class RAGPipeline:
             "even if it shares keywords with the question. Distinguish "
             "what the question asks from what a source actually says. "
             "For each claim, return relevant=true only if its cited source "
-            "directly supports an answer to the question. When uncertain, "
+            "directly supports an answer to the question. Distinguish "
+            "source support from relevance: separate teachings in one "
+            "hadith need not all be included. Judge overall sufficiency "
+            "against what the question actually requests, not whether "
+            "every detail of the passage is repeated. When uncertain, "
             "return false. Do not prefer a passage merely because it is "
             "first in the list. Return JSON only in this form: "
             '{"claims":[{"id":1,"relevant":true}],"answers_question":true}'
@@ -1115,8 +1122,11 @@ class RAGPipeline:
             "Audit the relevance of each claim independently. "
             "answers_question must be true only if the relevant claims "
             "collectively give a direct and sufficiently informative "
-            "answer to the question, rather than just an isolated "
-            "example. If the available evidence supports only a "
+            "answer to the question. A concise direct definition can "
+            "fully answer a narrow definition question; extra teachings "
+            "in the same source are not required. For broad requests, "
+            "an isolated example may be insufficient. If the available "
+            "evidence supports only a "
             "partial answer, return false unless the claims explicitly "
             "qualify that limitation."
         )
@@ -1163,6 +1173,13 @@ class RAGPipeline:
             f"answers_question={result.get('answers_question')}",
             flush=True,
         )
+        if result.get("answers_question") is not True and any(verdicts.values()):
+            print(
+                "[RAG AUDIT] Disagreement: individually relevant claims "
+                "did not satisfy overall answer sufficiency; "
+                "keeping strict rejection/retry behavior",
+                flush=True,
+            )
         # Keep only claims independently judged relevant. The verifier has
         # already checked their source quotes and factual support.
         relevant_claims = [
@@ -1426,10 +1443,13 @@ class RAGPipeline:
             "address the user's exact question. Ignore passages "
             "that only share a word or concern a different "
             "subject or event.\n"
-            "D. Cover every distinct point in the selected passages that "
-            "directly answers the question. If several passages "
-            "mention different examples of the same category, "
-            "give each example as its own claim.\n"
+            "D. Include only the smallest set of claims needed to answer "
+            "the exact question. Do not turn every sentence of a cited "
+            "hadith into a claim. A passage may contain a separate "
+            "definition, example, or teaching that the user did not ask "
+            "about; omit that extra material. If the question explicitly "
+            "requests a list, comparison, or multiple examples, include "
+            "each distinct directly relevant item.\n"
             "E. When examples come from different narrations, "
             "word the claims so it is clear that different "
             "narrations mention them. Never imply that one "
