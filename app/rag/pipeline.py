@@ -12,7 +12,7 @@ class RAGPipeline:
     EVIDENCE_CANDIDATE_POOL = 12
     MAX_CLAIMS = 8
     MAX_CLAIM_CHARS = 700
-    RETRIEVAL_LIMIT = 20
+    RETRIEVAL_LIMIT = 40
     MAX_CONTEXT_CHARS_PER_PASSAGE = 3000
     # Source text shown to the verifier per cited passage.
     VERIFIER_PASSAGE_CHARS = 3000
@@ -1106,6 +1106,8 @@ class RAGPipeline:
             "person, event, action, or consequence. "
             "For a narrow factual question, one directly answering claim "
             "is sufficient. Do not require the entire source to be summarized. "
+            "A question asking for tafsir, interpretation, or explanation "
+            "of a text is not answered merely by its virtues or rewards. "
             "For a broad explanatory request, a single isolated detail may "
             "be insufficient unless the answer explicitly states its limits. "
             "Do not infer missing facts or use outside religious knowledge. "
@@ -1277,6 +1279,8 @@ class RAGPipeline:
                 "Use only the supplied passages, not outside knowledge. "
                 "Identify the exact action, subject, and outcome asked about. "
                 "Choose evidence only if it supports an answer to the exact question. "
+                "Do not equate tafsir or interpretation with virtues, rewards, "
+                "or a mere mention of the text. "
                 "For broad explanatory questions, a passage giving a concrete "
                 "reason, benefit, consequence, or example can support a clearly "
                 "qualified partial answer. Do not pretend that partial evidence "

@@ -35,6 +35,8 @@ class RAGRetriever:
         ("ghusl", "ritual bath"),
         ("backbiting", "gheebah", "gheebat"),
         ("anger", "angry", "wrath"),
+        ("parents", "parent"),
+        ("treatment", "kindness", "companionship", "respect"),
         ("hypocrite", "hypocrisy", "munafiq"),
     )
 

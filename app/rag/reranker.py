@@ -57,6 +57,8 @@ class RAGReranker:
         {"marriage", "nikah", "nikkah"},
         {"backbiting", "gheebah", "gheebat"},
         {"anger", "angry", "wrath"},
+        {"parents", "parent"},
+        {"treatment", "kindness", "companionship", "respect"},
         {"hypocrite", "hypocrisy", "munafiq"},
     )
 
@@ -68,6 +70,10 @@ class RAGReranker:
             "benefit", "benefits", "virtue", "virtues",
             "value", "reward", "rewards", "merit",
             "merits", "status", "rank", "essential",
+        },
+        "exegesis": {
+            "tafsir", "exegesis", "interpretation", "commentary",
+            "explanation", "explains", "verse", "verses",
         },
         "definition": {
             "define", "definition", "meaning",
@@ -142,6 +148,10 @@ class RAGReranker:
         words = cls.tokenize(question)
 
         patterns = (
+            (
+                "exegesis",
+                r"\b(?:tafsir|exegesis|interpretation|commentary)\b",
+            ),
             (
                 "importance",
                 r"\b(?:importance|important|"
