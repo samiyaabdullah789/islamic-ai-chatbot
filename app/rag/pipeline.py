@@ -679,30 +679,68 @@ class RAGPipeline:
             "nine": 9, "ten": 10,
         }[word]
         return count if 2 <= count <= 10 else None
+    @staticmethod
+    def _list_items_from_claim(text):
+        """Extract explicit list members, not introductory sentences.
+
+        Supports numbered lists and concise comma/and-separated names.
+        It does not invent members or rely on domain-specific names.
+        """
+        text = " ".join(str(text).split()).strip()
+        # A numbered list must use a visible enumerator, not words such as
+        # 'first' appearing incidentally inside an explanation.
+        numbered = re.findall(
+            r"(?:^|\s)(?:[1-9]|10)[.)]\s+(.+?)(?=(?:\s+(?:[1-9]|10)[.)]\s+)|$)",
+            text,
+        )
+        if numbered:
+            return [part.strip(" .;:") for part in numbered if part.strip(" .;:")]
+        # Only parse a sentence as a comma-separated list when it contains
+        # at least three comma-separated parts. This avoids splitting prose.
+        if text.count(",") >= 2:
+            tail = text.split(":", 1)[-1].strip()
+            # 'The five prayers are Fajr, ...' has a descriptive preamble.
+            tail = re.sub(r"^.*?\b(?:are|include|comprise|consist of)\s+", "", tail, flags=re.I)
+            tail = re.sub(r"\s*,?\s+and\s+", ", ", tail, flags=re.I)
+            parts = [part.strip(" .;:") for part in tail.split(",")]
+            if len(parts) >= 3 and all(parts):
+                return parts
+        return []
+
     def _answer_is_complete(self, question, generated, kept):
-        """Conservative deterministic guard for explicitly counted lists."""
+        """Check explicit lists without mistaking prose or claims for items.
+
+        An answer with unverifiable or missing list members fails closed.
+        """
         count = self._requested_count(question)
         if count is None:
             return True
-        # Only apply when the question is explicitly asking for enumerated
-        # members. A year or quantity in a different kind of question is not
-        # a request for this many distinct claims.
         q = str(question).casefold()
         if not re.search(r"\b(?:what are|which are|list|name|enumerate|mention)\b", q):
             return True
-        if len(kept) < count:
-            print(f"[RAG COMPLETENESS] Expected {count} distinct items, got {len(kept)}", flush=True)
+        items = []
+        for claim in kept:
+            text = str(claim.get("text", ""))
+            extracted = self._list_items_from_claim(text)
+            if extracted:
+                items.extend(extracted)
+            elif not re.search(
+                r"\b(?:there are|is based on|following|principles|pillars include)\b",
+                text.casefold(),
+            ):
+                # A separately verified claim may itself be one list item.
+                items.append(text.strip())
+        distinct = {self._normalize_text(item) for item in items if self._normalize_text(item)}
+        if len(distinct) < count:
+            print(
+                f"[RAG COMPLETENESS] Expected {count} list items, found {len(distinct)}",
+                flush=True,
+            )
             return False
-        # If model labels items with ordinals, verify no ordinal is missing.
-        ordinals = {"first": 1, "second": 2, "third": 3, "fourth": 4,
-                    "fifth": 5, "sixth": 6, "seventh": 7, "eighth": 8,
-                    "ninth": 9, "tenth": 10}
-        observed = {value for claim in kept for name, value in ordinals.items()
-                    if re.search(r"\b" + name + r"\b", claim["text"].casefold())}
-        if observed and observed != set(range(1, count + 1)):
-            print(f"[RAG COMPLETENESS] Ordinal gap: {sorted(observed)}", flush=True)
-            return False
+        # Do not infer missing numbered items from incidental ordinal words.
+        # The independent source verifier still checks each cited claim.
         return True
+
     def _validate_claims(
         self,
         claims,
@@ -2115,6 +2153,13 @@ class RAGPipeline:
         # independent question-relevance audit. Citations follow the subset.
         kept_claims = audit_result["claims"]
         print(f"[RAG AUDIT] Relevant verified claims retained: {len(kept_claims)}", flush=True)
+        if not hadith_request and not self._answer_is_complete(
+            retrieval_query, raw_claims, kept_claims
+        ):
+            return self._refuse(
+                "relevance audit removed required list items",
+                self.INVALID_MESSAGE,
+            )
         if hadith_request:
             answer = kept_claims[0]["text"]
         else:
