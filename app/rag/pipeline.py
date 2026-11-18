@@ -678,7 +678,7 @@ class RAGPipeline:
         patterns = (
             rf"\b(?:list|name|enumerate|mention|give|provide)\s+(?:the\s+)?{number}\b",
             rf"\b(?:what|which)\s+are\s+(?:the\s+)?{number}\b",
-            rf"\b{number}\s+(?:pillars|principles|types|kinds|examples|"
+            rf"\b{number}\s+(?:[a-z-]+\s+){{0,2}}(?:pillars|principles|types|kinds|examples|"
             rf"benefits|reasons|steps|items|points|prayers|conditions)\b",
         )
         for pattern in patterns:
@@ -692,6 +692,69 @@ class RAGPipeline:
                 }[word]
                 return count if 2 <= count <= 10 else None
         return None
+    @classmethod
+    def _direct_answer_shape_valid(cls, question, claims):
+        """Reject clearly non-responsive count/name answers after source verification.
+
+        This is a generic *shape* check, not an answer database: it cannot
+        establish that a count or name is true. Source verification still does.
+        """
+        q = " ".join(str(question or "").casefold().split())
+        if not claims:
+            return False
+        texts = [str(item.get("text", "")).strip() for item in claims]
+        words = r"\b(?:\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b"
+        if re.search(r"\b(?:how many|number of|how often)\b", q):
+            # Require an explicit count of the requested kind of thing, not
+            # a count of its subparts. Extract the requested noun phrase
+            # generically from question wording, never from a facts table.
+            count_phrase = re.search(
+                r"\bhow many\s+(.+?)(?:\s+do\b|\s+does\b|\s+are\b|\s+is\b|\?|$)", q
+            )
+            subject_terms = []
+            if count_phrase:
+                subject_terms = [x for x in re.findall(r"[a-z]+", count_phrase.group(1))
+                                 if x not in {"the", "a", "an", "daily", "obligatory", "compulsory", "each", "per"}]
+            # 'How many times do ... pray?' is about frequency. A report
+            # of 2 units within a ritual must not count as an answer.
+            subject = subject_terms[-1] if subject_terms else None
+            if subject:
+                roots = {subject, subject.rstrip("s")}
+                hits = False
+                for sentence in texts:
+                    for root in roots:
+                        if len(root) < 3:
+                            continue
+                        # A count may be followed by up to two adjectives.
+                        pattern = rf"{words}\s+(?:[a-z-]+\s+){{0,2}}{re.escape(root)}s?\b"
+                        if re.search(pattern, sentence.casefold()):
+                            hits = True
+                            break
+                    if hits:
+                        break
+                if not hits:
+                    print(f"[RAG INTENT] No count for requested unit: {subject}", flush=True)
+                    return False
+            elif not any(re.search(words, t, re.I) for t in texts):
+                print("[RAG INTENT] Missing explicit numeric answer", flush=True)
+                return False
+            return True
+        if re.search(r"\b(?:names? of|name the|what are the names|called what)\b", q):
+            count = cls._requested_count(q)
+            if count is not None:
+                members = []
+                for text in texts:
+                    members.extend(cls._list_items_from_claim(text))
+                numbered_quotes = set()
+                for claim in claims:
+                    match = re.match(r"^\s*(\d{1,2})[.)]\s+", str(claim.get("quote", "")))
+                    if match:
+                        numbered_quotes.add(int(match.group(1)))
+                if len({cls._normalize_text(x) for x in members if x}) < count and not set(range(1, count + 1)).issubset(numbered_quotes):
+                    print(f"[RAG INTENT] Requested {count} names, but no complete named list", flush=True)
+                    return False
+        return True
+
     @staticmethod
     def _list_items_from_claim(text):
         """Extract explicit list members, not introductory sentences.
@@ -1443,11 +1506,10 @@ class RAGPipeline:
             votes = [first, second]
             if first[0] != second[0]:
                 print(
-                    "[RAG SELECT] Disagreement. Running third comparison.",
+                    "[RAG SELECT] Disagreement; retaining candidates for "
+                    "strict downstream verification (no third selection call)",
                     flush=True,
                 )
-                rotated = passages[1:] + passages[:1]
-                votes.append(await compare(rotated, 3))
         except (ValueError, TypeError, KeyError) as error:
             print(f"[RAG SELECT] Selection failed: {error}; "
                   "passing reranked evidence to strict verification", flush=True)
@@ -1629,6 +1691,16 @@ class RAGPipeline:
             "15. Every factual claim must be supported "
             "by the supplied evidence.\n\n"
             "HOW TO BUILD THE ANSWER:\n"
+            "WRITING STYLE: Use natural, clear English and answer the user, "
+            "not the source document. Paraphrase accurately instead of "
+            "copying long source sentences. Avoid repeating the same opening "
+            "phrase, duplicate claims, and unrelated details. "
+            "For practical advice, write distinct practical actions supported "
+            "by evidence, rather than reciting a mixed list of quotations. "
+            "If the question asks how to do something, phrase each point "
+            "as an actionable suggestion where supported. If evidence "
+            "is narrowly limited, clearly qualify the answer. "
+            "Never add instructions or conclusions absent from the evidence.\n"
             "A. Write the answer as a list of short claims. "
             "Each claim is ONE complete sentence stating ONE "
             "thing a passage says.\n"
@@ -1646,7 +1718,11 @@ class RAGPipeline:
             "that only share a word or concern a different "
             "subject or event.\n"
             "D. Include only the smallest set of claims needed to answer "
-            "the exact question. Do not turn every sentence of a cited "
+            "the exact question. For general lifestyle guidance, select "
+            "a few diverse, relevant and actionable teachings, rather than "
+            "reciting the full pillars of a religion unless directly asked. "
+            "Do not let incidental mentions of prayer, fasting or struggle "
+            "displace the requested guidance. Do not turn every sentence of a cited "
             "hadith into a claim. A passage may contain a separate "
             "definition, example, or teaching that the user did not ask "
             "about; omit that extra material. If the question explicitly "
@@ -2103,6 +2179,21 @@ class RAGPipeline:
                 "model reported insufficient evidence",
                 self.MISSING_MESSAGE,
             )
+        # The model may repeat identical claims in one JSON output.
+        # Deduplicate exact equivalents, without merging distinct claims.
+        seen_claims = set()
+        unique_claims = []
+        for item in raw_claims:
+            if not isinstance(item, dict):
+                unique_claims.append(item)
+                continue
+            key = (self._normalize_text(str(item.get("text", ""))),
+                   str(item.get("source_index")), str(item.get("evidence_id")))
+            if key in seen_claims:
+                continue
+            seen_claims.add(key)
+            unique_claims.append(item)
+        raw_claims = unique_claims
         generated_count = min(
             len(raw_claims),
             self.MAX_CLAIMS,
@@ -2222,6 +2313,11 @@ class RAGPipeline:
                 "verified answer missing requested enumerated items",
                 self.INVALID_MESSAGE,
             )
+        if not self._direct_answer_shape_valid(retrieval_query, kept_claims):
+            if not _retry_mode:
+                print("[RAG RETRY] Missing directly requested answer shape", flush=True)
+                return await self.generate(question, conversation_history, madhhab, _retry_mode=True)
+            return self._refuse("answer type does not match question", self.INVALID_MESSAGE)
         # A second, comparative relevance check sees every retrieved
         # passage, not only the passages cited by the answer.
         audit_result = await self._audit_answer_relevance(
@@ -2241,6 +2337,8 @@ class RAGPipeline:
         # independent question-relevance audit. Citations follow the subset.
         kept_claims = audit_result["claims"]
         print(f"[RAG AUDIT] Relevant verified claims retained: {len(kept_claims)}", flush=True)
+        if not self._direct_answer_shape_valid(retrieval_query, kept_claims):
+            return self._refuse("audit removed the requested answer", self.INVALID_MESSAGE)
         if not hadith_request and not self._answer_is_complete(
             retrieval_query, raw_claims, kept_claims
         ):
