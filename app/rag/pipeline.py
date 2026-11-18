@@ -10,7 +10,7 @@ from app.llm.client import ollama_client
 class RAGPipeline:
     MAX_PASSAGES = 5
     EVIDENCE_CANDIDATE_POOL = 12
-    MAX_CLAIMS = 8
+    MAX_CLAIMS = 10
     MAX_CLAIM_CHARS = 700
     RETRIEVAL_LIMIT = 40
     MAX_CONTEXT_CHARS_PER_PASSAGE = 3000
@@ -735,22 +735,24 @@ class RAGPipeline:
         # source quotes. This is generic and does not encode list answers.
         # An introductory claim is not a list item; quotes such as
         # "1. ..." through "5. ..." are independently identifiable.
-        numbered_items = set()
+        numbered_by_source = {}
         for claim in kept:
             quote = str(claim.get("quote", ""))
             match = re.match(r"^\s*(\d{1,2})[.)]\s+\S", quote)
             if match:
-                numbered_items.add(int(match.group(1)))
-        if numbered_items:
+                source_key = claim.get("source_index")
+                numbered_by_source.setdefault(source_key, set()).add(int(match.group(1)))
+        if numbered_by_source:
             expected = set(range(1, count + 1))
-            if not expected.issubset(numbered_items):
-                print(
-                    f"[RAG COMPLETENESS] Expected numbered items "
-                    f"{sorted(expected)}, found {sorted(numbered_items)}",
-                    flush=True,
-                )
-                return False
-            return True
+            if any(expected.issubset(numbers) for numbers in numbered_by_source.values()):
+                return True
+            found = sorted(set().union(*numbered_by_source.values()))
+            print(
+                f"[RAG COMPLETENESS] Expected numbered items "
+                f"{sorted(expected)} from one source, found {found}",
+                flush=True,
+            )
+            return False
 
         items = []
         for claim in kept:
@@ -759,7 +761,7 @@ class RAGPipeline:
             if extracted:
                 items.extend(extracted)
             elif not re.search(
-                r"\b(?:there are|is based on|following|pillars include)\b",
+                r"\b(?:there are|is based on|following|one of the|\d+\s+(?:items|principles|types|steps)\b)\b",
                 text.casefold(),
             ):
                 # A separately verified claim may itself be one list item.
@@ -1509,13 +1511,59 @@ class RAGPipeline:
         print(f"[RAG SELECT] Candidate evidence indexes: {chosen}", flush=True)
         return [passage_map[index] for index in chosen]
     @staticmethod
-    def _assemble_answer(claims):
+    def _assemble_answer(claims, question=None):
+        """Format independently verified claims without generating new facts.
+
+        For explicit lists with verified source-numbered evidence, retain the
+        source's original item wording and numbering. This is independent of
+        Islamic subject matter and does not alter evidence verification.
+        """
+        question_text = str(question or "").casefold()
+        list_requested = bool(re.search(
+            r"\b(?:what are|which are|list|name|enumerate|mention)\b",
+            question_text,
+        ))
+        if list_requested:
+            numbered = []
+            introductions = []
+            seen_numbers = set()
+            source_ids = set()
+            for claim in claims:
+                quote = str(claim.get("quote", "")).strip()
+                match = re.match(r"^(\d{1,2})[.)]\s+(.+)$", quote, re.S)
+                if match:
+                    number = int(match.group(1))
+                    if number in seen_numbers:
+                        continue
+                    item = " ".join(match.group(2).split()).strip()
+                    if not item:
+                        continue
+                    seen_numbers.add(number)
+                    source_ids.add(claim.get("source_index"))
+                    numbered.append((number, item))
+                else:
+                    text = str(claim.get("text", "")).strip()
+                    if text:
+                        introductions.append(text)
+            # A complete consecutive list from a single passage can be shown
+            # without inventing phrasing or merging different narrations.
+            indexes = {number for number, _ in numbered}
+            if (len(numbered) >= 2 and len(source_ids) == 1
+                    and indexes == set(range(1, len(numbered) + 1))):
+                # Avoid a potentially misleading or repetitious intro. The
+                # individual entries are direct verified source quotations.
+                intro = ""
+                lines = []
+                for number, item in sorted(numbered):
+                    if item[-1] not in '.!?':
+                        item += '.'
+                    lines.append(f"{number}. {item}")
+                return (intro + "\n" if intro else "") + "\n".join(lines)
+
         sentences = []
         seen = set()
         for claim in claims:
             text = claim["text"].strip().rstrip(",;:-/ ")
-            # Only remove normalized exact duplicates. Similar statements
-            # are left intact rather than risking loss of distinct rulings.
             key = RAGPipeline._normalize_text(text)
             if not key or key in seen:
                 continue
@@ -1635,7 +1683,9 @@ class RAGPipeline:
             "Use one complete, directly relevant sentence per claim, "
             "with at most " + str(self.MAX_CLAIMS) + " claims. "
             "For enumerations, use separate claims for independently "
-            "supported items. Do not guess missing items. "
+            "supported items. When the question explicitly requests a list, "
+            "prioritize one claim per distinct item; do not waste a claim "
+            "on a repetitive introductory sentence. Do not guess missing items. "
             "Do not put citation strings in claim text. "
             "If the evidence is insufficient, return {\"claims\":[]}.\n\n"
             f"AVAILABLE PASSAGES:\n{source_context}"
@@ -2201,7 +2251,7 @@ class RAGPipeline:
         if hadith_request:
             answer = kept_claims[0]["text"]
         else:
-            answer = self._assemble_answer(kept_claims)
+            answer = self._assemble_answer(kept_claims, question=retrieval_query)
             if not answer or self._is_incomplete_answer(answer):
                 return self._refuse(
                     "assembled answer incomplete",
