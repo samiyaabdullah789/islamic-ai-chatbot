@@ -731,6 +731,27 @@ class RAGPipeline:
         q = str(question).casefold()
         if not re.search(r"\b(?:what are|which are|list|name|enumerate|mention)\b", q):
             return True
+        # Prefer exact numbered item labels from independently verified
+        # source quotes. This is generic and does not encode list answers.
+        # An introductory claim is not a list item; quotes such as
+        # "1. ..." through "5. ..." are independently identifiable.
+        numbered_items = set()
+        for claim in kept:
+            quote = str(claim.get("quote", ""))
+            match = re.match(r"^\s*(\d{1,2})[.)]\s+\S", quote)
+            if match:
+                numbered_items.add(int(match.group(1)))
+        if numbered_items:
+            expected = set(range(1, count + 1))
+            if not expected.issubset(numbered_items):
+                print(
+                    f"[RAG COMPLETENESS] Expected numbered items "
+                    f"{sorted(expected)}, found {sorted(numbered_items)}",
+                    flush=True,
+                )
+                return False
+            return True
+
         items = []
         for claim in kept:
             text = str(claim.get("text", ""))
@@ -738,7 +759,7 @@ class RAGPipeline:
             if extracted:
                 items.extend(extracted)
             elif not re.search(
-                r"\b(?:there are|is based on|following|principles|pillars include)\b",
+                r"\b(?:there are|is based on|following|pillars include)\b",
                 text.casefold(),
             ):
                 # A separately verified claim may itself be one list item.
