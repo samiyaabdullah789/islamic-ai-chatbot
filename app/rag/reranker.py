@@ -816,11 +816,23 @@ class CrossEncoderReranker:
             flush=True,
         )
 
-        cross_scores = await asyncio.to_thread(
-            self._score,
-            focused_question,
-            documents,
-        )
+        try:
+            cross_scores = await asyncio.to_thread(
+                self._score,
+                focused_question,
+                documents,
+            )
+            if len(cross_scores) != len(documents):
+                raise ValueError("CrossEncoder returned incorrect number of scores")
+        except (RuntimeError, ValueError, OSError, ImportError) as error:
+            print(
+                f"[RERANK WARNING] CrossEncoder unavailable ({type(error).__name__}); "
+                "using existing heuristic reranker for this request",
+                flush=True,
+            )
+            return await self._heuristic.rerank(
+                focused_question, documents, limit=limit
+            )
 
         heuristic_documents = (
             self._heuristic._build_heuristic_scores(

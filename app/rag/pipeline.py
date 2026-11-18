@@ -668,17 +668,30 @@ class RAGPipeline:
         return catalog, "\n".join(blocks)
     @staticmethod
     def _requested_count(question):
-        q = str(question).casefold()
-        match = re.search(r"\b(?:the\s+)?(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\b", q)
-        if not match:
-            return None
-        word = match.group(1)
-        count = int(word) if word.isdigit() else {
-            "one": 1, "two": 2, "three": 3, "four": 4,
-            "five": 5, "six": 6, "seven": 7, "eight": 8,
-            "nine": 9, "ten": 10,
-        }[word]
-        return count if 2 <= count <= 10 else None
+        """Only infer a target count when the question asks for a list.
+
+        Avoid treating years, hadith numbers or other incidental digits as
+        the requested list size. This does not know any Islamic answer.
+        """
+        q = " ".join(str(question).casefold().split())
+        number = r"(\d{1,2}|two|three|four|five|six|seven|eight|nine|ten)"
+        patterns = (
+            rf"\b(?:list|name|enumerate|mention|give|provide)\s+(?:the\s+)?{number}\b",
+            rf"\b(?:what|which)\s+are\s+(?:the\s+)?{number}\b",
+            rf"\b{number}\s+(?:pillars|principles|types|kinds|examples|"
+            rf"benefits|reasons|steps|items|points|prayers|conditions)\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, q)
+            if match:
+                word = match.group(1)
+                count = int(word) if word.isdigit() else {
+                    "two": 2, "three": 3, "four": 4, "five": 5,
+                    "six": 6, "seven": 7, "eight": 8, "nine": 9,
+                    "ten": 10,
+                }[word]
+                return count if 2 <= count <= 10 else None
+        return None
     @staticmethod
     def _list_items_from_claim(text):
         """Extract explicit list members, not introductory sentences.
@@ -1550,9 +1563,9 @@ class RAGPipeline:
             "A. Write the answer as a list of short claims. "
             "Each claim is ONE complete sentence stating ONE "
             "thing a passage says.\n"
-            "B. Every claim must cite one passage with "
-            "source_index and a quote. Different claims may "
-            "cite different passages.\n"
+            "B. Every claim must cite one passage using its original "
+            "source_index and one evidence_id from the supplied evidence "
+            "catalog. Different claims may cite different passages.\n"
             "C. Passage order is not proof of relevance. Compare all "
             "available evidence against the exact question. For a narrowly scoped factual "
             "question, use the most direct passage. For broad explanatory "
@@ -1592,28 +1605,18 @@ class RAGPipeline:
             f"{self._madhhab_instruction(madhhab, general_question)}"
             "\n\n"
             "OUTPUT RULES:\n"
-            "Return ONLY valid JSON with this structure:\n"
-            '{"claims":[{"text":"One complete sentence '
-            'stating one thing the passage says.",'
-            f'"source_index":{self._example_source_index(source_context)},'
-            '"quote":"at least five words copied exactly"}]}\n\n'
-            "For numbered lists, quote the individual numbered item "
-            "itself. Do NOT repeat the introductory sentence before "
-            "each separate item.\n"
-            "Each quote must contain at least five words "
-            "copied exactly and contiguously from the ANSWER "
-            "part of the cited passage (not from its question) "
-            "and must itself state or directly support the "
-            "claim.\n"
-            "The quote is an evidence extract, not a paraphrase of your claim. "
-            "Copy punctuation, numbering and intervening words as printed. "
-            "Never combine non-adjacent parts of a passage into one quote. "
-            "If a sentence contains a list, copy a continuous span from "
-            "the source exactly, without skipping intervening words.\n"
-            "Do not put citations inside claim text.\n"
-            f"Use at most {self.MAX_CLAIMS} claims.\n"
-            "If unsupported, return exactly:\n"
-            '{"claims":[]}\n\n'
+            "Return only one valid JSON object containing a claims array. "
+            "Every claim must have text, source_index, and evidence_id. "
+            "Use only evidence IDs from the separate evidence catalog "
+            "provided after these instructions. No free-form quote field "
+            "is required because the application resolves the exact source "
+            "quote from evidence_id.\n"
+            "Use one complete, directly relevant sentence per claim, "
+            "with at most " + str(self.MAX_CLAIMS) + " claims. "
+            "For enumerations, use separate claims for independently "
+            "supported items. Do not guess missing items. "
+            "Do not put citation strings in claim text. "
+            "If the evidence is insufficient, return {\"claims\":[]}.\n\n"
             f"AVAILABLE PASSAGES:\n{source_context}"
         )
     async def _translate_verified_answer(self, answer, language):
@@ -1943,10 +1946,10 @@ class RAGPipeline:
             general_question,
         )
         system_prompt += (
-            "\n\nEVIDENCE ID RULE (OVERRIDES QUOTE COPYING):\n"
+            "\n\nEVIDENCE CATALOG RULE:\n"
             "Use evidence_id from the exact source-owned evidence catalog below. "
             "Never invent an evidence ID. Each claim must contain text, "
-            "source_index and evidence_id. The quote field is optional. "
+            "source_index and evidence_id. Do not include a quote field. "
             "Do not combine separate evidence spans into one claim. "
             "For numbered lists use the ID of each numbered item. "
             "The system will resolve the source quotation itself. "
@@ -1990,23 +1993,37 @@ class RAGPipeline:
                 flush=True,
             )
         try:
-            result = self._parse_json(
-                raw_response
-            )
+            result = self._parse_json(raw_response)
             raw_claims = result.get("claims")
             if not isinstance(raw_claims, list):
-                raise ValueError(
-                    "Missing or invalid claims list"
-                )
+                raise ValueError("Missing or invalid claims list")
         except (ValueError, TypeError) as error:
-            print(
-                f"[RAG] Invalid generation output: {error}",
-                flush=True,
-            )
-            return self._refuse(
-                "generation JSON invalid",
-                self.INVALID_MESSAGE,
-            )
+            print(f"[RAG] Invalid generation output: {error}", flush=True)
+            # Retry formatting only, with the SAME source evidence. This avoids
+            # paying for a second retrieval/rerank and does not bypass checks.
+            repair_messages = messages + [
+                {"role": "assistant", "content": str(raw_response)[:3000]},
+                {"role": "user", "content": (
+                    "Your last response was not valid JSON with a claims array. "
+                    "Regenerate using the SAME provided evidence catalog. "
+                    "Return only a JSON object. Each claim requires text, "
+                    "source_index, evidence_id. Do not invent new evidence. "
+                    "If no supported answer can be formed, return "
+                    "{\"claims\":[]}."
+                )},
+            ]
+            try:
+                repaired = await ollama_client.generate(
+                    repair_messages, json_mode=True, task="answer"
+                )
+                result = self._parse_json(repaired)
+                raw_claims = result.get("claims")
+                if not isinstance(raw_claims, list):
+                    raise ValueError("Missing or invalid claims list after retry")
+                print("[RAG JSON] Recovery succeeded", flush=True)
+            except (ValueError, TypeError) as recovery_error:
+                print(f"[RAG JSON] Recovery failed: {recovery_error}", flush=True)
+                return self._refuse("generation JSON invalid", self.INVALID_MESSAGE)
         if not raw_claims:
             if not _retry_mode:
                 print("[RAG RETRY] No claims; trying alternate evidence", flush=True)
