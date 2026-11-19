@@ -963,6 +963,20 @@ class RAGPipeline:
                     f"recovered near-verbatim source quote (passage {index})",
                     flush=True,
                 )
+            # An evidence passage mentioning only a named subtype does not
+            # prove that the parent category is an alias of that subtype.
+            alias = re.search(r"\b(.+?)\s+is\s+(?:also\s+)?known\s+as\s+(.+?)(?:[.,;]|$)", text, re.I)
+            if alias:
+                category = self._normalize_text(alias.group(1)).split()
+                subtype = self._normalize_text(alias.group(2)).split()
+                if category and subtype and len(category) <= 7 and len(subtype) <= 7:
+                    # A hyphenated extension of the category is a subtype,
+                    # not proof of an alternate name for the broad concept.
+                    parent = category[-1]
+                    extended = re.search(r"\b" + re.escape(parent) + r"-(?:[a-z]+-)*[a-z]+\b", alias.group(2).casefold())
+                    if extended:
+                        print(f"[RAG SCOPE] Claim {position}: unsupported broad/subtype alias", flush=True)
+                        continue
             scope_conflict = self._source_scope_conflict(
                 text, passage["source_answer"]
             )
@@ -1283,6 +1297,15 @@ class RAGPipeline:
             "Do not require the entire source to be summarized. "
             "A question asking for tafsir, interpretation, or explanation "
             "of a text is not answered merely by its virtues or rewards. "
+            "For WHY/importance questions, identify an explicit supported "
+            "reason, benefit, consequence, or purpose, not just a definition "
+            "or a regulation. For HOW/improvement questions, require actual "
+            "useful actions or advice, not only descriptions of a topic. "
+            "For multi-part questions, ensure EACH requested part is addressed. "
+            "For requests in detail, one short definition is insufficient. "
+            "Ignore repeated paraphrases when judging overall sufficiency. "
+            "A broad category is NOT the same as one particular subtype; "
+            "do not accept a claim conflating the two. "
             "For a broad explanatory request, a single isolated detail may "
             "be insufficient unless the answer explicitly states its limits. "
             "Do not infer missing facts or use outside religious knowledge. "
@@ -1554,77 +1577,132 @@ class RAGPipeline:
             return primary, supporting
         start = time.perf_counter()
         try:
-            first = await compare(passages, 1)
-            second = await compare(list(reversed(passages)), 2)
-            votes = [first, second]
-            if first[0] != second[0]:
-                print(
-                    "[RAG SELECT] Disagreement; retaining candidates for "
-                    "strict downstream verification (no third selection call)",
-                    flush=True,
-                )
+            primary, supporting = await compare(passages, 1)
         except (ValueError, TypeError, KeyError) as error:
             print(f"[RAG SELECT] Selection failed: {error}; "
                   "passing reranked evidence to strict verification", flush=True)
-            return passages
+            return passages[:self.MAX_PASSAGES]
         finally:
             print(
                 f"[TIMING] Evidence selection: {time.perf_counter() - start:.2f}s",
                 flush=True,
             )
-        counts = {index: sum(vote[0] == index for vote in votes)
-                  for index in valid_indexes | {None}}
-        primary = next((index for index, count in counts.items()
-                        if count >= 2), None)
         if primary is None:
-            # A split vote is inconclusive, not proof of irrelevance.
-            # Allow one non-null candidate to proceed ONLY to the existing
-            # exact-quote, claim, and independent relevance verification.
-            # No passage is automatically accepted as a final answer.
-            non_null_votes = [vote[0] for vote in votes if vote[0] is not None]
-            distinct = set(non_null_votes)
-            if len(distinct) == 1 and non_null_votes:
-                primary = non_null_votes[0]
-                print(
-                    f"[RAG SELECT] Provisional evidence {primary}; "
-                    "downstream verification required",
-                    flush=True,
-                )
-            else:
-                print("[RAG SELECT] No consensus; passing reranked "
-                      "evidence to strict verification", flush=True)
-                return passages
-        # The selector is advisory, not a hard filter. Preserve several
-        # high-ranked alternatives so an erroneous majority cannot remove
-        # the strongest directly answering evidence before generation.
-        # The downstream quote, support, and relevance checks still apply.
+            print("[RAG SELECT] No direct primary; retaining candidates for verification", flush=True)
+            return passages[:self.MAX_PASSAGES]
+        # Include the strongest reranked alternative even when selector errs.
+        # For explanatory questions, include distinct supporting references.
         chosen = [primary]
-        for candidate in passages[:min(4, self.MAX_PASSAGES)]:
+        if multi:
+            chosen.extend(supporting[:self.MAX_PASSAGES - 1])
+        for candidate in passages:
             index = candidate["source_index"]
             if index not in chosen:
                 chosen.append(index)
-        # A candidate nominated as primary by another ordering deserves
-        # consideration even if it lost the majority vote.
-        for voted_primary, _ in votes:
-            if voted_primary is not None and voted_primary not in chosen:
-                chosen.append(voted_primary)
-        if multi:
-            support_votes = {}
-            for _, supporting in votes:
-                for index in supporting:
-                    if index != primary:
-                        support_votes[index] = support_votes.get(index, 0) + 1
-            chosen.extend(
-                p["source_index"] for p in passages
-                if p["source_index"] != primary
-                and support_votes.get(p["source_index"], 0) >= 2
-            )
+            if len(chosen) >= self.MAX_PASSAGES:
+                break
+        chosen = list(dict.fromkeys(chosen))[:self.MAX_PASSAGES]
         passage_map = {p["source_index"]: p for p in passages}
-        chosen = list(dict.fromkeys(chosen))
-        if len(chosen) > self.MAX_PASSAGES:
-            chosen = chosen[:self.MAX_PASSAGES]
         print(f"[RAG SELECT] Candidate evidence indexes: {chosen}", flush=True)
         return [passage_map[index] for index in chosen]
+    @classmethod
+    def _claim_semantic_key(cls, text):
+        """Normalize cosmetic differences for conservative duplicate detection."""
+        text = cls._clean_pdf_display_text(str(text)).casefold()
+        text = re.sub(r"\b(?:allah.s apostle|the prophet|prophet muhammad)\s+(?:said|taught|instructed)\s*(?:that|:)?\s*", "", text)
+        text = re.sub(r"\b(?:according to the prophet|as stated by the prophet)\b", "", text)
+        return cls._normalize_text(text)
+
+    @classmethod
+    def _semantic_duplicate(cls, left, right):
+        """Conservatively remove near-copies, not distinct factual claims.
+
+        Requires highly similar wording OR near-identical content tokens.
+        Do not merge short list members, negated statements, modalities,
+        quantities, or opposite claims merely because they share vocabulary.
+        """
+        a = cls._claim_semantic_key(left)
+        b = cls._claim_semantic_key(right)
+        if not a or not b:
+            return False
+        if a == b:
+            return True
+        aw, bw = a.split(), b.split()
+        if min(len(aw), len(bw)) < 9:
+            return False
+        # Negation or differing explicit numeric facts must never be collapsed.
+        negations = {"not", "never", "no", "without", "unless"}
+        if (set(aw) & negations) != (set(bw) & negations):
+            return False
+        quantities = set(re.findall(r"\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b", a))
+        other_quantities = set(re.findall(r"\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b", b))
+        if quantities != other_quantities:
+            return False
+        # A high text similarity is NOT enough if one substantive
+        # qualifier is replaced by another (e.g. spot vs blister).
+        edits = [
+            (tag, aw[i:j], bw[k:l])
+            for tag, i, j, k, l in SequenceMatcher(None, aw, bw, autojunk=False).get_opcodes()
+            if tag == "replace"
+        ]
+        # A changed sentence opener is often cosmetic; a change in the
+        # middle/end may be a meaningful different example or condition.
+        substantive_replacement = any(i > 0 for tag, old, new in edits
+            for i in [next((n for n in range(len(aw)) if aw[n:n + len(old)] == old), 0)])
+        if SequenceMatcher(None, a, b).ratio() >= 0.84 and not substantive_replacement:
+            return True
+        # Covers modest rewrites such as "will come a day when" while
+        # avoiding generic topical overlap between long, distinct teachings.
+        stop = {"a", "an", "the", "is", "are", "was", "were", "and", "or", "to",
+                "of", "in", "on", "for", "by", "with", "that", "this", "it",
+                "he", "she", "they", "there", "will", "be", "has", "have", "had"}
+        a_terms = set(aw) - stop
+        b_terms = set(bw) - stop
+        if not a_terms or not b_terms:
+            return False
+        overlap = len(a_terms & b_terms) / max(len(a_terms | b_terms), 1)
+        return overlap >= 0.87 and abs(len(aw) - len(bw)) <= 9
+
+    @classmethod
+    def _deduplicate_claims(cls, claims):
+        """Keep the earliest source-verified claim for each near-identical idea.
+
+        Preserve exact numbered list items, distinct names, and explicit
+        different scopes; no new Islamic information is introduced here.
+        """
+        result = []
+        for claim in claims:
+            text = str(claim.get("text", "")).strip()
+            if not text:
+                continue
+            quote = str(claim.get("quote", ""))
+            # Numbered source list members are protected from semantic merging.
+            if not re.match(r"^\s*\d{1,2}[.)]\s+", quote) and any(
+                not re.match(r"^\s*\d{1,2}[.)]\s+", str(previous.get("quote", "")))
+                and cls._semantic_duplicate(text, previous.get("text", ""))
+                for previous in result
+            ):
+                continue
+            result.append(claim)
+        return result
+
+    @staticmethod
+    def _quality_coverage_report(question, claims):
+        """Diagnostic only. Do not turn a supported partial answer into refusal."""
+        q = str(question).casefold()
+        text = " ".join(str(c.get("text", "")) for c in claims).casefold()
+        concerns = []
+        if re.search(r"\b(?:why|importance|important|significance|benefit)\b", q):
+            if not re.search(r"\b(?:because|leads? to|helps?|benefits?|protects?|prevents?|supports?|\bso that\b|reason|purpose|allows?|enables?|results? in|reward|consequence|obligat|essential)\b", text):
+                concerns.append("requested reason/importance not explicit")
+        if re.search(r"\b(?:in detail|detailed|elaborate|explain .* in depth)\b", q):
+            if len(text.split()) < 35:
+                concerns.append("requested detail likely insufficient")
+        if re.search(r"\bhow (?:can|do|should) (?:i|we)\b", q):
+            if len(claims) < 2:
+                concerns.append("practical guidance limited to one point")
+        return concerns
+
     @staticmethod
     def _assemble_answer(claims, question=None):
         """Format independently verified claims without generating new facts.
@@ -1677,7 +1755,7 @@ class RAGPipeline:
 
         sentences = []
         seen = set()
-        for claim in claims:
+        for claim in RAGPipeline._deduplicate_claims(claims):
             text = claim["text"].strip().rstrip(",;:-/ ")
             key = RAGPipeline._normalize_text(text)
             if not key or key in seen:
@@ -1770,6 +1848,20 @@ class RAGPipeline:
             "address the user's exact question. Ignore passages "
             "that only share a word or concern a different "
             "subject or event.\n"
+            "C1. When a question has multiple parts joined by AND (for "
+            "example what something IS and WHY it matters), select "
+            "different supported claims for each part. Do not answer just "
+            "the first part. Reasons, benefits, or consequences must be "
+            "explicit in the cited evidence, not inferred. "
+            "If asked to explain in detail, provide distinct supported "
+            "details rather than repeating a one-sentence definition. "
+            "If asking HOW to improve or act in daily life, write a few "
+            "specific, independently sourced, actionable suggestions "
+            "where evidence supports them, not repetitions of a general creed. "
+            "Separate a general topic from a named subtype, especially "
+            "when sources describe obligations with different scopes. "
+            "Do not say that a broad concept is also known as a subtype. "
+            "Avoid restating one claim with different words.\n"
             "D. Include only the smallest set of claims needed to answer "
             "the exact question. For general lifestyle guidance, select "
             "a few diverse, relevant and actionable teachings, rather than "
@@ -2409,6 +2501,13 @@ class RAGPipeline:
         # Use only claims that passed both source verification and the
         # independent question-relevance audit. Citations follow the subset.
         kept_claims = audit_result["claims"]
+        if not hadith_request:
+            before = len(kept_claims)
+            kept_claims = self._deduplicate_claims(kept_claims)
+            if len(kept_claims) != before:
+                print(f"[RAG QUALITY] Semantic duplicates removed: {before - len(kept_claims)}", flush=True)
+            for concern in self._quality_coverage_report(retrieval_query, kept_claims):
+                print(f"[RAG QUALITY] Review needed: {concern}", flush=True)
         print(f"[RAG AUDIT] Relevant verified claims retained: {len(kept_claims)}", flush=True)
         if not self._direct_answer_shape_valid(retrieval_query, kept_claims):
             return self._refuse("audit removed the requested answer", self.INVALID_MESSAGE)
