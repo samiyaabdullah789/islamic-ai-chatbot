@@ -1297,10 +1297,15 @@ class RAGPipeline:
             "Do not require the entire source to be summarized. "
             "A question asking for tafsir, interpretation, or explanation "
             "of a text is not answered merely by its virtues or rewards. "
-            "For WHY/importance questions, identify an explicit supported "
-            "reason, benefit, consequence, or purpose, not just a definition "
-            "or a regulation. For HOW/improvement questions, require actual "
-            "useful actions or advice, not only descriptions of a topic. "
+            "For WHY/importance questions, a claim that merely instructs "
+            "someone to do the good deed is NOT a reason why it is important. "
+            "Require an explicitly supported reason, benefit, consequence, "
+            "value or purpose, not just a definition or rule. For HOW questions, "
+            "a story about somebody being angry is NOT a technique to manage "
+            "anger unless it actually gives usable advice. Require concrete "
+            "relevant actions, not descriptive anecdotes or general labels. "
+            "For each claim ask: would removing it make the practical answer "
+            "less useful? If no, mark irrelevant. "
             "For multi-part questions, ensure EACH requested part is addressed. "
             "For requests in detail, one short definition is insufficient. "
             "Ignore repeated paraphrases when judging overall sufficiency. "
@@ -1450,7 +1455,8 @@ class RAGPipeline:
             r"how many|what are the|which are the|"
             r"importance of|significance of|teach about|"
             r"teachings about|benefits of|virtues of|"
-            r"why is|why are|explain|describe)\b",
+            r"why is|why are|explain|describe|"
+            r"how can|how should|how do i|ways to)\b",
             q,
         ))
     @classmethod
@@ -1516,10 +1522,16 @@ class RAGPipeline:
                 "Choose evidence only if it supports an answer to the exact question. "
                 "Do not equate tafsir or interpretation with virtues, rewards, "
                 "or a mere mention of the text. "
-                "For broad explanatory questions, a passage giving a concrete "
-                "reason, benefit, consequence, or example can support a clearly "
-                "qualified partial answer. Do not pretend that partial evidence "
-                "proves a complete general explanation. "
+                "For broad explanatory questions, select passages containing "
+                "distinct practical actions, clear reasons, benefits, consequences, "
+                "or examples that directly help answer the user's request. "
+                "If asked HOW to improve, prefer actionable guidance over a "
+                "list of general foundational beliefs. If asked WHY, prefer a "
+                "passage explaining a reason or value over a passage that only "
+                "mentions the topic. Do not treat two narrations of the same "
+                "advice as two different supporting points. A partial passage "
+                "supports only a qualified partial answer, never a complete "
+                "general explanation. "
                 "Shared words or a generally related moral lesson are insufficient. "
                 "For reward questions, prefer evidence connecting the requested "
                 "behavior to its actual consequence, not a different event. "
@@ -1590,18 +1602,23 @@ class RAGPipeline:
         if primary is None:
             print("[RAG SELECT] No direct primary; retaining candidates for verification", flush=True)
             return passages[:self.MAX_PASSAGES]
-        # Include the strongest reranked alternative even when selector errs.
-        # For explanatory questions, include distinct supporting references.
+        # Preserve the selector's direct evidence instead of silently filling
+        # every empty slot with merely top-ranked (and possibly off-topic)
+        # material.  One reranked alternative is retained as a safety net:
+        # the selector may have missed a directly responsive document.
+        # Explicit counts/lists can still use all five distinct sources.
         chosen = [primary]
         if multi:
             chosen.extend(supporting[:self.MAX_PASSAGES - 1])
-        for candidate in passages:
-            index = candidate["source_index"]
-            if index not in chosen:
-                chosen.append(index)
-            if len(chosen) >= self.MAX_PASSAGES:
-                break
         chosen = list(dict.fromkeys(chosen))[:self.MAX_PASSAGES]
+        if len(chosen) == 1:
+            alternative = next(
+                (p["source_index"] for p in passages
+                 if p["source_index"] not in chosen),
+                None,
+            )
+            if alternative is not None:
+                chosen.append(alternative)
         passage_map = {p["source_index"]: p for p in passages}
         print(f"[RAG SELECT] Candidate evidence indexes: {chosen}", flush=True)
         return [passage_map[index] for index in chosen]
@@ -1833,8 +1850,14 @@ class RAGPipeline:
             "is narrowly limited, clearly qualify the answer. "
             "Never add instructions or conclusions absent from the evidence.\n"
             "A. Write the answer as a list of short claims. "
-            "Each claim is ONE complete sentence stating ONE "
-            "thing a passage says.\n"
+            "Each claim is ONE complete sentence that answers the user's "
+            "question, NOT a mechanically copied hadith sentence. "
+            "Use a natural direct explanation or actionable phrasing while "
+            "keeping the cited evidence's precise meaning and scope. "
+            "Only quote the original wording when the user asks for a quote. "
+            "Avoid repeated attribution such as 'The Prophet said' in every "
+            "claim. Never invent an explanation or causal reason not present "
+            "in the cited passage.\n"
             "B. Every claim must cite one passage using its original "
             "source_index and one evidence_id from the supplied evidence "
             "catalog. Different claims may cite different passages.\n"

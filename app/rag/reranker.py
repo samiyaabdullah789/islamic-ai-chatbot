@@ -176,7 +176,8 @@ class RAGReranker:
             ),
             (
                 "method",
-                r"\b(?:how to|how do|how did|"
+                r"\b(?:how to|how do|how did|how can|how should|"
+                r"what can i do|what should i do|"
                 r"steps|procedure|method|"
                 r"perform|performed)\b",
             ),
