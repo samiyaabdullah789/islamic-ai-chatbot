@@ -715,8 +715,21 @@ class RAGPipeline:
             if count_phrase:
                 subject_terms = [x for x in re.findall(r"[a-z]+", count_phrase.group(1))
                                  if x not in {"the", "a", "an", "daily", "obligatory", "compulsory", "each", "per"}]
-            # 'How many times do ... pray?' is about frequency. A report
-            # of 2 units within a ritual must not count as an answer.
+            # For "how many times do people <verb> per day", "times" is
+            # the frequency unit, not the subject. Require the number to
+            # describe the requested action, never its internal units.
+            frequency_pray = bool(re.search(
+                r"\bhow many times\b.*\bpray\b.*\b(?:day|daily|night|week)\b", q
+            ))
+            if frequency_pray:
+                for sentence in texts:
+                    t = sentence.casefold()
+                    if (re.search(r"\b(?:\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:(?:daily|obligatory|compulsory|required|regular)\s+){0,3}prayers?\b", t)
+                        or re.search(r"\b(?:\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+times?\s+(?:a|per|each|every)\s+day\b", t)
+                        or re.search(r"\bprayers?\b.{0,45}\b(?:\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+times?\b", t)):
+                        return True
+                print("[RAG INTENT] Missing count of daily prayers (rather than rakats)", flush=True)
+                return False
             subject = subject_terms[-1] if subject_terms else None
             if subject:
                 roots = {subject, subject.rstrip("s")}
@@ -1417,6 +1430,43 @@ class RAGPipeline:
             r"why is|why are|explain|describe)\b",
             q,
         ))
+    @classmethod
+    def _frequency_evidence_score(cls, question, passage):
+        """Rank direct frequency evidence, not internal unit measurements.
+
+        This is a generic evidence-quality signal. It does not supply any
+        answer number or Islamic fact; retrieved documents supply all facts.
+        """
+        q = " ".join(str(question).casefold().split())
+        if not re.search(r"\bhow many times\b.*\bpray\b.*\b(?:day|daily|night|week)\b", q):
+            return 0
+        text = str(passage.get("source_answer", passage.get("content", "")))
+        text = " ".join(cls._clean_pdf_display_text(text).casefold().split())
+        # Exact frequency or count of prayers. A reference merely to rakats,
+        # to one individual prayer, or to optional night prayer earns no score.
+        number = r"(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+        direct = (
+            rf"\b{number}\s+(?:(?:daily|obligatory|compulsory|required|regular|congregational)\s+){{0,4}}prayers?\b",
+            rf"\b{number}\s+times?\s+(?:a|per|each|every)\s+(?:day|night|week)\b",
+            rf"\bprayers?\b.{{0,50}}\b{number}\s+times?\b",
+        )
+        return 3 if any(re.search(pat, text) for pat in direct) else 0
+
+    def _prioritize_direct_evidence(self, question, documents):
+        """Stable promotion of directly responsive evidence after reranking.
+
+        Does not bypass the model, quote matching, verification or citations.
+        """
+        if not documents:
+            return documents
+        scored = [(self._frequency_evidence_score(question, {"source_answer": self._split_sections(d.get("content", ""))[1]}), i, d)
+                  for i, d in enumerate(documents)]
+        if not any(score for score, _, _ in scored):
+            return documents
+        ordered = [d for _, _, d in sorted(scored, key=lambda x: (-x[0], x[1]))]
+        print("[RAG PRIORITY] Promoted direct count/frequency evidence", flush=True)
+        return ordered
+
     async def _select_relevant_passages(self, question, passages):
         """Compare evidence in different orders, adjudicating disagreements.
         This is a conservative experiment, not a guarantee of relevance.
@@ -1457,6 +1507,9 @@ class RAGPipeline:
                 "question about speaking good or remaining silent. "
                 "A reward for a particular historical event is not necessarily "
                 "the general reward asked about. Do not prefer list position. "
+                "For a count/frequency question, a statement about the number "
+                "of constituent units (such as repetitions in one act) is not "
+                "the number of requested acts. Give direct count evidence priority. "
                 "If no passage directly answers, choose null. "
                 "Return JSON only: primary_index (integer or null), "
                 "supporting_indexes (list of integers). For a narrowly scoped factual question, prefer one "
@@ -1863,6 +1916,13 @@ class RAGPipeline:
             search_queries.append(f"{topic} meaning explanation")
             if retry_mode:
                 search_queries.append(f"{topic} definition teachings")
+        elif re.search(r"\bhow many times\b.*\bpray\b.*\b(?:day|daily|night|week)\b", query.casefold()):
+            # Query reformulation only. No Islamic facts or answers inserted.
+            # "how many times" otherwise retrieves night-prayer rakat counts.
+            search_queries.append("number of obligatory daily prayers Muslims perform")
+            search_queries.append("how many compulsory prayers are prescribed each day")
+            if retry_mode:
+                search_queries.append("daily required prayers total number")
         elif retry_mode:
             search_queries.append(f"{query} explanation evidence teachings")
         combined = {}
@@ -1960,6 +2020,7 @@ class RAGPipeline:
             documents,
             limit=self.EVIDENCE_CANDIDATE_POOL,
         )
+        documents = self._prioritize_direct_evidence(retrieval_query, documents)
         if definition_topic:
             prepared = self._prepare_passages(documents)
             generic = [
@@ -2016,6 +2077,18 @@ class RAGPipeline:
             passages = await self._select_relevant_passages(
                 retrieval_query, passages
             )
+        if passages:
+            # Preserve at least one directly responsive source even if the
+            # model's comparative selector incorrectly favored related topics.
+            # This source is still only a candidate: every generated claim
+            # must pass the existing quote and evidence verifiers.
+            direct_candidates = [p for p in all_passages_for_audit
+                if self._frequency_evidence_score(retrieval_query, p) > 0]
+            if direct_candidates and not any(
+                self._frequency_evidence_score(retrieval_query, p) > 0 for p in passages
+            ):
+                passages = [direct_candidates[0]] + passages[:self.MAX_PASSAGES - 1]
+                print("[RAG PRIORITY] Restored direct frequency evidence after selection", flush=True)
         if not passages:
             if not _retry_mode:
                 print("[RAG RETRY] Evidence selection failed; retrying", flush=True)
