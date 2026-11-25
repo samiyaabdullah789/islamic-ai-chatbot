@@ -1258,18 +1258,10 @@ class RAGPipeline:
             f"answers_question={answers_question}",
             flush=True,
         )
-        # Claims the verifier judged unrelated to the question. A retry
-        # must not reuse their evidence (see _retry_record).
-        irrelevant = [
-            claim
-            for number, claim in enumerate(claims, start=1)
-            if verdicts.get(number, ("", True))[1] is False
-        ]
         return {
             "kept": kept,
             "contradicted": contradicted,
             "answers_question": answers_question,
-            "irrelevant": irrelevant,
         }
     async def _audit_answer_relevance(self, question, claims, passages):
         """Independently audit relevance without trusting malformed model output.
@@ -2288,47 +2280,12 @@ class RAGPipeline:
         print(f"[RAG EXPAND] Unique candidates: {len(combined)}", flush=True)
         return list(combined.values()), topic
 
-    @classmethod
-    def _evidence_key(cls, claim):
-        """Identify a claim's evidence by its document and exact source quote."""
-        document = claim.get("document") or {}
-        return (
-            str(document.get("id") or ""),
-            cls._normalize_text(str(claim.get("quote") or "")),
-        )
-
-    @staticmethod
-    def _passage_ids(passages):
-        return tuple(
-            str((passage.get("document") or {}).get("id") or "")
-            for passage in passages
-        )
-
-    def _retry_record(self, stage, message, passages=None, rejected_claims=()):
-        """Summarise a failed first attempt so the retry cannot repeat it.
-
-        passage_ids: the exact evidence sent to generation. A retry with
-        the same evidence and the same prompt would fail the same way.
-        rejected_evidence: quotes the verifier or the relevance audit
-        judged NOT relevant to the question. A retry must not answer the
-        question again from that same evidence, only reworded.
-        """
-        return {
-            "stage": stage,
-            "message": message,
-            "passage_ids": self._passage_ids(passages) if passages else None,
-            "rejected_evidence": {
-                self._evidence_key(claim) for claim in rejected_claims
-            },
-        }
-
     async def generate(
         self,
         question: str,
         conversation_history: list[dict[str, str]],
         madhhab: str | None = None,
         _retry_mode: bool = False,
-        _previous_attempt: dict | None = None,
     ) -> str:
         pipeline_start = time.perf_counter()
         question = question.strip()
@@ -2467,10 +2424,7 @@ class RAGPipeline:
         if not passages:
             if not _retry_mode:
                 print("[RAG RETRY] Evidence selection failed; retrying", flush=True)
-                return await self.generate(
-                    question, conversation_history, madhhab, _retry_mode=True,
-                    _previous_attempt=self._retry_record("no passage passed comparative evidence selection", self.MISSING_MESSAGE),
-                )
+                return await self.generate(question, conversation_history, madhhab, _retry_mode=True)
             return self._refuse(
                 "no passage passed comparative evidence selection",
                 self.MISSING_MESSAGE,
@@ -2521,19 +2475,6 @@ class RAGPipeline:
             [p["document"] for p in passages],
             self.MAX_PASSAGES,
         )
-        if (
-            _retry_mode
-            and _previous_attempt
-            and _previous_attempt.get("passage_ids") == self._passage_ids(passages)
-        ):
-            # Same evidence, same question and the same prompt: the model
-            # would fail exactly as before. Return the first attempt's
-            # outcome instead of spending more LLM calls.
-            return self._refuse(
-                "retry would reuse identical evidence after: "
-                f"{_previous_attempt.get('stage')}",
-                _previous_attempt.get("message") or self.MISSING_MESSAGE,
-            )
         source_context_parts = []
         for passage in passages:
             metadata = passage["metadata"]
@@ -2638,10 +2579,7 @@ class RAGPipeline:
         if not raw_claims:
             if not _retry_mode:
                 print("[RAG RETRY] No claims; trying alternate evidence", flush=True)
-                return await self.generate(
-                    question, conversation_history, madhhab, _retry_mode=True,
-                    _previous_attempt=self._retry_record("model reported insufficient evidence", self.MISSING_MESSAGE, passages),
-                )
+                return await self.generate(question, conversation_history, madhhab, _retry_mode=True)
             return self._refuse(
                 "model reported insufficient evidence",
                 self.MISSING_MESSAGE,
@@ -2687,29 +2625,6 @@ class RAGPipeline:
             passages,
             evidence_catalog=evidence_catalog,
         )
-        rejected_evidence = (
-            (_previous_attempt or {}).get("rejected_evidence") or set()
-        )
-        if _retry_mode and rejected_evidence and verified_claims:
-            reused = [
-                claim for claim in verified_claims
-                if self._evidence_key(claim) in rejected_evidence
-            ]
-            if reused:
-                print(
-                    f"[RAG RETRY] Dropped {len(reused)} claim(s) reusing evidence "
-                    "already judged not to answer the question",
-                    flush=True,
-                )
-                verified_claims = [
-                    claim for claim in verified_claims
-                    if self._evidence_key(claim) not in rejected_evidence
-                ]
-                if not verified_claims:
-                    return self._refuse(
-                        "retry reused evidence already judged irrelevant",
-                        self.MISSING_MESSAGE,
-                    )
         print(
             f"[RAG] Claims with valid quotes: "
             f"{len(verified_claims)}/{generated_count}",
@@ -2718,10 +2633,7 @@ class RAGPipeline:
         if not verified_claims:
             if not _retry_mode:
                 print("[RAG RETRY] No valid claims; trying alternate evidence", flush=True)
-                return await self.generate(
-                    question, conversation_history, madhhab, _retry_mode=True,
-                    _previous_attempt=self._retry_record("no claim had a verifiable quote", self.INVALID_MESSAGE, passages),
-                )
+                return await self.generate(question, conversation_history, madhhab, _retry_mode=True)
             return self._refuse(
                 "no claim had a verifiable quote",
                 self.INVALID_MESSAGE,
@@ -2765,10 +2677,7 @@ class RAGPipeline:
         if not check["answers_question"]:
             if not _retry_mode:
                 print("[RAG RETRY] Answer did not address question", flush=True)
-                return await self.generate(
-                    question, conversation_history, madhhab, _retry_mode=True,
-                    _previous_attempt=self._retry_record("evidence does not answer the question", self.MISSING_MESSAGE, passages, check.get("irrelevant", [])),
-                )
+                return await self.generate(question, conversation_history, madhhab, _retry_mode=True)
             return self._refuse(
                 "evidence does not answer the question",
                 self.MISSING_MESSAGE,
@@ -2804,10 +2713,7 @@ class RAGPipeline:
         ):
             if not _retry_mode:
                 print("[RAG RETRY] Incomplete list; retrying with all candidates", flush=True)
-                return await self.generate(
-                    question, conversation_history, madhhab, _retry_mode=True,
-                    _previous_attempt=self._retry_record("verified answer missing requested enumerated items", self.INVALID_MESSAGE, passages),
-                )
+                return await self.generate(question, conversation_history, madhhab, _retry_mode=True)
             return self._refuse(
                 "verified answer missing requested enumerated items",
                 self.INVALID_MESSAGE,
@@ -2815,10 +2721,7 @@ class RAGPipeline:
         if not self._direct_answer_shape_valid(retrieval_query, kept_claims):
             if not _retry_mode:
                 print("[RAG RETRY] Missing directly requested answer shape", flush=True)
-                return await self.generate(
-                    question, conversation_history, madhhab, _retry_mode=True,
-                    _previous_attempt=self._retry_record("answer type does not match question", self.INVALID_MESSAGE, passages),
-                )
+                return await self.generate(question, conversation_history, madhhab, _retry_mode=True)
             return self._refuse("answer type does not match question", self.INVALID_MESSAGE)
         # A second, comparative relevance check sees every retrieved
         # passage, not only the passages cited by the answer.
@@ -2830,10 +2733,7 @@ class RAGPipeline:
         if not isinstance(audit_result, dict) or not audit_result.get("answers_question"):
             if not _retry_mode:
                 print("[RAG RETRY] Relevance audit failed; retrying", flush=True)
-                return await self.generate(
-                    question, conversation_history, madhhab, _retry_mode=True,
-                    _previous_attempt=self._retry_record("independent relevance audit rejected the answer", self.INVALID_MESSAGE, passages, [claim for claim in kept_claims if claim not in audit_result.get("claims", [])] if isinstance(audit_result, dict) else []),
-                )
+                return await self.generate(question, conversation_history, madhhab, _retry_mode=True)
             return self._refuse(
                 "independent relevance audit rejected the answer",
                 self.INVALID_MESSAGE,

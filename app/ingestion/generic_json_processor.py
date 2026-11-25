@@ -7,6 +7,21 @@ from pathlib import Path
 CHUNK_SIZE = 1200
 CHUNK_OVERLAP = 150
 
+# Optional record fields kept as metadata for citations only.
+# They are not part of the embedded text, so retrieval is unchanged.
+CITATION_FIELDS = {
+    "record_id": "id",
+    "url": "url",
+    "title": "title",
+}
+
+
+def _clean_string(value) -> str:
+    """Return a stripped string, or "" for missing / non-string values."""
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split()).strip()
+
 
 def split_answer(
     answer: str,
@@ -97,6 +112,7 @@ def process_generic_json(file_path: str) -> list[dict]:
 
     documents = []
     skipped = 0
+    title_fallbacks = 0
 
     for record_index, record in enumerate(records):
 
@@ -117,6 +133,14 @@ def process_generic_json(file_path: str) -> list[dict]:
 
         question = question.strip()
         answer = answer.strip()
+
+        # Some records have an empty question but a meaningful title.
+        # Use the title as the question so the answer is not lost.
+        if not question and answer:
+            title = _clean_string(record.get("title"))
+            if title:
+                question = title
+                title_fallbacks += 1
 
         if not question or not answer:
             skipped += 1
@@ -160,6 +184,12 @@ def process_generic_json(file_path: str) -> list[dict]:
             "tags": tags.strip(),
         }
 
+        # Citation metadata (only when present; ChromaDB rejects None).
+        for key, field in CITATION_FIELDS.items():
+            value = _clean_string(record.get(field))
+            if value:
+                metadata[key] = value
+
         answer_chunks = split_answer(answer)
 
         for chunk_number, answer_chunk in enumerate(
@@ -182,6 +212,7 @@ def process_generic_json(file_path: str) -> list[dict]:
     print(f"[JSON] Total records: {len(records)}")
     print(f"[JSON] Valid Q&A records: {len(records) - skipped}")
     print(f"[JSON] Skipped records: {skipped}")
+    print(f"[JSON] Questions taken from title: {title_fallbacks}")
     print(f"[JSON] Total chunks: {len(documents)}")
 
     return documents
