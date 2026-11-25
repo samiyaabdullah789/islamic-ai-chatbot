@@ -34,4 +34,4 @@ evals/results/
 *.log
 
 # ChromaDB Vector Database
-chroma_data/
+chroma_data/ 

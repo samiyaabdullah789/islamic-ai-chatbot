@@ -7,6 +7,7 @@ import unicodedata
 from app.rag.retriever import rag_retriever
 from app.rag.reranker import rag_reranker
 from app.llm.client import ollama_client
+from app.vector_store.chroma_store import chroma_store
 class RAGPipeline:
     MAX_PASSAGES = 5
     EVIDENCE_CANDIDATE_POOL = 12
@@ -14,6 +15,20 @@ class RAGPipeline:
     MAX_CLAIM_CHARS = 700
     RETRIEVAL_LIMIT = 40
     MAX_CONTEXT_CHARS_PER_PASSAGE = 3000
+    # A JSON source record can be stored as several overlapping chunks
+    # with IDs "source-{source_id}-chunk-{record}-{part}". Bukhari hadith
+    # IDs (source-1-v..-b..-h..) and PDF chunk IDs (source-N-chunk-K) do
+    # not match, so those documents are never changed.
+    RECORD_CHUNK_ID = re.compile(r"^source-(\d+)-chunk-(\d+)-(\d+)$")
+    # Answer characters kept per merged record: about one ingestion
+    # chunk plus its overlap, so the generation prompt does not grow.
+    RECORD_ANSWER_CHARS = 1500
+    # Look this far back for the start of the sentence the best chunk
+    # begins in (chunks usually start mid-sentence because of overlap).
+    RECORD_SENTENCE_LOOKBACK = 400
+    # Shortest overlap accepted when joining neighbouring chunks.
+    RECORD_MIN_OVERLAP = 20
+    RECORD_MAX_OVERLAP = 400
     # Source text shown to the verifier per cited passage.
     VERIFIER_PASSAGE_CHARS = 3000
     # If fewer than this share of the generated claims survive
@@ -2019,6 +2034,207 @@ class RAGPipeline:
             is not None for m in occurrences
         )
 
+    @staticmethod
+    def _record_answer_header(contents):
+        """Return the shared 'Question: ...\nAnswer:' header of sibling chunks.
+
+        Sibling chunks of one record all start with the same question
+        header, so the header is the common prefix up to its last
+        '\nAnswer:'. Returns None when no shared header is found.
+        """
+        prefix = contents[0]
+        for content in contents[1:]:
+            limit = min(len(prefix), len(content))
+            index = 0
+            while index < limit and prefix[index] == content[index]:
+                index += 1
+            prefix = prefix[:index]
+        marker = prefix.rfind("\nAnswer:")
+        if marker < 0 or not prefix.startswith("Question:"):
+            return None
+        return prefix[:marker + len("\nAnswer:")]
+
+    @classmethod
+    def _join_chunk_texts(cls, left, right):
+        """Join two neighbouring answer chunks, removing their overlap.
+
+        Returns the joined text and the offset where `right` starts.
+        """
+        longest = min(len(left), len(right), cls.RECORD_MAX_OVERLAP)
+        for length in range(longest, cls.RECORD_MIN_OVERLAP - 1, -1):
+            if left.endswith(right[:length]):
+                return left + right[length:], len(left) - length
+        # No overlap found: keep both texts, never drop content.
+        return left + "\n\n" + right, len(left) + 2
+
+    @classmethod
+    def _record_window(cls, text, focus_start):
+        """Cut a sentence-aligned window of the record around its best chunk."""
+        start = 0
+        if focus_start > 0:
+            boundaries = [
+                match.end()
+                for match in re.finditer(r"[.!?]\s+|\n+", text[:focus_start])
+            ]
+            if (
+                boundaries
+                and focus_start - boundaries[-1] <= cls.RECORD_SENTENCE_LOOKBACK
+            ):
+                start = boundaries[-1]
+            else:
+                start = focus_start
+        budget = cls.RECORD_ANSWER_CHARS
+        if len(text) - start <= budget:
+            return text[start:].strip()
+        cut = text[start:start + budget]
+        endings = [
+            match.end()
+            for match in re.finditer(r"[.!?](?=\s)|\n", cut)
+        ]
+        if endings and endings[-1] >= budget // 2:
+            return cut[:endings[-1]].strip()
+        return cut.rsplit(" ", 1)[0].strip() + "..."
+
+    def _consolidate_record_chunks(self, documents):
+        """Merge chunks of one JSON record into a single passage.
+
+        Several chunks of the same record used to occupy separate passage
+        slots, repeating the question and the 150-character overlap and
+        producing duplicate claims. Each record now keeps one passage at
+        the position of its best-ranked chunk: that chunk plus its direct
+        neighbours, overlap removed, cut to RECORD_ANSWER_CHARS. Neighbours
+        are read from ChromaDB (read-only). Documents whose IDs are not
+        record chunks are returned unchanged and in the same order.
+        """
+        groups = {}
+        order = []
+        for document in documents:
+            match = self.RECORD_CHUNK_ID.match(str(document.get("id") or ""))
+            if not match:
+                order.append(("document", document))
+                continue
+            key = (match.group(1), int(match.group(2)))
+            part = int(match.group(3))
+            group = groups.get(key)
+            if group is None:
+                group = groups[key] = {
+                    "best": document,
+                    "best_part": part,
+                    "parts": {},
+                    "retrieved": [],
+                }
+                order.append(("record", key))
+            group["parts"].setdefault(part, document)
+            group["retrieved"].append(document)
+        if not groups:
+            return documents
+        wanted = []
+        for (source_id, record), group in groups.items():
+            for part in (group["best_part"] - 1, group["best_part"] + 1):
+                if part >= 0 and part not in group["parts"]:
+                    wanted.append(f"source-{source_id}-chunk-{record}-{part}")
+        fetched = 0
+        if wanted:
+            try:
+                found = chroma_store.collection.get(
+                    ids=wanted,
+                    include=["documents", "metadatas"],
+                )
+                ids = found.get("ids") or []
+                contents = found.get("documents") or []
+                metadatas = found.get("metadatas") or []
+                for index, doc_id in enumerate(ids):
+                    match = self.RECORD_CHUNK_ID.match(str(doc_id))
+                    content = contents[index] if index < len(contents) else None
+                    if not match or not str(content or "").strip():
+                        continue
+                    key = (match.group(1), int(match.group(2)))
+                    if key not in groups:
+                        continue
+                    metadata = metadatas[index] if index < len(metadatas) else {}
+                    groups[key]["parts"].setdefault(int(match.group(3)), {
+                        "id": str(doc_id),
+                        "content": str(content),
+                        "metadata": metadata if isinstance(metadata, dict) else {},
+                    })
+                    fetched += 1
+            except Exception as error:
+                print(
+                    "[RAG RECORDS] WARNING: could not read neighbouring chunks "
+                    f"({type(error).__name__}: {error}); merging retrieved chunks only",
+                    flush=True,
+                )
+        result = []
+        merged_records = 0
+        dropped_chunks = 0
+        for kind, item in order:
+            if kind == "document":
+                result.append(item)
+                continue
+            group = groups[item]
+            best = group["best"]
+            best_part = group["best_part"]
+            sequence = [best_part]
+            if best_part - 1 in group["parts"]:
+                sequence.insert(0, best_part - 1)
+            if best_part + 1 in group["parts"]:
+                sequence.append(best_part + 1)
+            dropped_chunks += len(group["retrieved"]) - 1
+            if len(sequence) == 1:
+                # Nothing to merge: keep the chunk exactly as retrieved.
+                result.append(best)
+                continue
+            contents = [str(group["parts"][part].get("content") or "") for part in sequence]
+            header = self._record_answer_header(contents)
+            if header is None:
+                result.append(best)
+                continue
+            answers = [content[len(header):].strip() for content in contents]
+            text = answers[0]
+            focus_start = 0
+            for position in range(1, len(answers)):
+                text, offset = self._join_chunk_texts(text, answers[position])
+                if sequence[position] == best_part:
+                    focus_start = offset
+            window = self._record_window(text, focus_start)
+            if not window:
+                result.append(best)
+                continue
+            distances = [
+                d.get("distance") for d in group["retrieved"]
+                if isinstance(d.get("distance"), (int, float))
+                and not isinstance(d.get("distance"), bool)
+            ]
+            scores = [
+                d.get("retrieval_score") for d in group["retrieved"]
+                if isinstance(d.get("retrieval_score"), (int, float))
+                and not isinstance(d.get("retrieval_score"), bool)
+            ]
+            source_id, record = item
+            merged = {
+                **best,
+                "id": f"source-{source_id}-chunk-{record}-all",
+                "content": f"{header} {window}",
+                "metadata": {
+                    **(best.get("metadata") or {}),
+                    "record_index": record,
+                    "chunk_parts": f"{sequence[0]}-{sequence[-1]}",
+                },
+            }
+            if distances:
+                merged["distance"] = min(distances)
+            if scores:
+                merged["retrieval_score"] = max(scores)
+            result.append(merged)
+            merged_records += 1
+        print(
+            f"[RAG RECORDS] {len(documents)} candidates -> {len(result)} | "
+            f"records merged: {merged_records} | duplicate chunks removed: "
+            f"{dropped_chunks} | neighbours read: {fetched}",
+            flush=True,
+        )
+        return result
+
     async def _retrieve_with_definition_expansion(
         self, query, madhhab, general_question, retry_mode=False
     ):
@@ -2124,6 +2340,7 @@ class RAGPipeline:
                 "no documents retrieved",
                 self.MISSING_MESSAGE,
             )
+        documents = self._consolidate_record_chunks(documents)
         self._log_documents(
             "Retrieved candidates (before rerank)",
             documents,
