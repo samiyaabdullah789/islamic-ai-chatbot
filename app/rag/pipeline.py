@@ -983,9 +983,19 @@ class RAGPipeline:
             evidence_id = item.get("evidence_id")
             if evidence_catalog is not None:
                 resolved = evidence_catalog.get(evidence_id) if isinstance(evidence_id, str) else None
-                if resolved is None or resolved[0] != index:
+                if resolved is None:
                     print(f"[RAG EVIDENCE] Claim {position}: invalid evidence ID", flush=True)
                     continue
+                if resolved[0] != index:
+                    # The evidence ID names its passage (P2E1 = passage 2).
+                    # The model sometimes numbers passages by position
+                    # instead; the ID is authoritative.
+                    print(
+                        f"[RAG EVIDENCE] Claim {position}: source_index {index} "
+                        f"corrected to {resolved[0]} from {evidence_id}",
+                        flush=True,
+                    )
+                    index = resolved[0]
                 quote = resolved[1]
             text = item.get("text")
             if (
@@ -1272,9 +1282,20 @@ class RAGPipeline:
                 f"{question}\n"
                 f"(Original wording: {original_question})"
             )
+        madhhab_line = madhhab or 'General'
+        if context_passages is not None and (
+            not madhhab or str(madhhab).casefold() == "general"
+        ):
+            # "General" is not a school. Without this, the verifier read
+            # rule 8 as "a Hanafi passage cannot answer a General question"
+            # and rejected a correct Hanafi ruling.
+            madhhab_line = (
+                "None selected. Passages from any madhhab are acceptable; "
+                "rule 8 does not apply."
+            )
         verifier_user = (
             f"USER QUESTION:\n{question_line}\n\n"
-            f"SELECTED MADHHAB:\n{madhhab or 'General'}\n\n"
+            f"SELECTED MADHHAB:\n{madhhab_line}\n\n"
             f"SOURCE PASSAGES:\n{passages_text}\n\n"
             f"CLAIMS TO VERIFY:\n{claims_text}\n\n"
             "Verify each claim separately and return the JSON."
@@ -2136,6 +2157,42 @@ class RAGPipeline:
             return bool(letters) and len(urdu) / len(letters) >= 0.6
         return True
 
+    # (English pattern, accepted Roman Urdu forms, accepted Urdu-script forms)
+    LEGAL_TERM_RULES = (
+        (r"\bwajib\b", r"\bw(?:a|aa)jib\b", r"واجب"),
+        (r"\b(?:fard|farz)\b", r"\bfar[dz]\b", r"فرض"),
+        (r"\bsunnah?\b", r"\bsunn(?:at|ah|a)\b", r"سنت"),
+        (r"\bharam\b", r"\bh(?:a|aa)ram\b", r"حرام"),
+        (r"\bhalal\b", r"\bh(?:a|aa)lal\b", r"حلال"),
+        (r"\bmakruh\b", r"\bmakr(?:u|oo)h\b", r"مکروہ"),
+        (r"\bmake[- ]?ups?\b|\bmade up\b|\bmaking up\b", r"\bqa[zd]a\b", r"قضا"),
+    )
+    # Terms a translation must not add when the English does not say them.
+    LEGAL_TERM_INTRODUCTION = (
+        (r"\b(?:fard|farz|obligatory|compulsory|mandatory)\b", r"\bfar[dz]\b", r"فرض"),
+        (r"\bharam\b|\bforbidden\b|\bprohibited\b|\bunlawful\b", r"\bh(?:a|aa)ram\b", r"حرام"),
+    )
+
+    @classmethod
+    def _legal_terms_preserved(cls, answer, translated, language):
+        """A translation must keep the ruling words and must not add new ones.
+
+        Example caught: "witr is a sunna and not wajib" translated as
+        "witr sunnat hai aur farz nahi" (wajib became farz).
+        """
+        urdu = language == "urdu"
+        for english, roman, script in cls.LEGAL_TERM_RULES:
+            if re.search(english, answer, re.I) and not re.search(
+                script if urdu else roman, translated, 0 if urdu else re.I
+            ):
+                return False
+        for english, roman, script in cls.LEGAL_TERM_INTRODUCTION:
+            if not re.search(english, answer, re.I) and re.search(
+                script if urdu else roman, translated, 0 if urdu else re.I
+            ):
+                return False
+        return True
+
     async def _translate_verified_answer(self, answer, language):
         """Translate only after evidence checks; never translate citations.
 
@@ -2153,6 +2210,18 @@ class RAGPipeline:
             "Do not add or remove information. Keep the same number "
             "of sentences and their order. Return only translated text."
         )
+        glossary = (
+            " Ruling terms: keep wajib as wajib, fard as farz, sunna as "
+            "sunnat, haram, halal and makruh unchanged, and translate "
+            "'make up' a missed prayer as qaza. Never replace one ruling "
+            "term with another."
+        )
+        has_ruling_terms = bool(re.search(
+            r"\b(?:wajib|fard|farz|sunnah?|haram|halal|makruh|make[- ]?up|made up)\b",
+            answer, re.I,
+        ))
+        if has_ruling_terms:
+            base_system += glossary
         if language == "roman_urdu":
             strict_system = (
                 "Translate the English text into Roman Urdu: the Urdu "
@@ -2174,6 +2243,8 @@ class RAGPipeline:
                 "add nothing. Example: 'Fasting in Ramadan is obligatory.' "
                 "-> 'رمضان کے روزے فرض ہیں۔' Return only the translation."
             )
+        if has_ruling_terms:
+            strict_system += glossary
         start = time.perf_counter()
         for attempt, system in enumerate((base_system, strict_system), start=1):
             messages = [
@@ -2195,15 +2266,21 @@ class RAGPipeline:
             if not translated or len(translated) > max(300, len(answer) * 4):
                 print("[LANGUAGE] Translation unusable; keeping verified English", flush=True)
                 return answer
-            if self._translation_matches(translated, language):
+            if not self._translation_matches(translated, language):
+                problem = f"Translation is not {language}"
+            elif not self._legal_terms_preserved(answer, translated, language):
+                problem = "Translation changed or dropped a ruling term"
+            else:
                 return translated
             if attempt == 1:
                 print(
-                    f"[LANGUAGE] Translation is not {language}; retrying with a stricter prompt",
+                    f"[LANGUAGE] {problem}; retrying with a stricter prompt",
                     flush=True,
                 )
+            else:
+                print(f"[LANGUAGE] {problem}", flush=True)
         print(
-            f"[LANGUAGE] Translation still not {language}; keeping verified English",
+            "[LANGUAGE] Translation rejected; keeping verified English",
             flush=True,
         )
         return answer
@@ -2533,6 +2610,56 @@ class RAGPipeline:
             or str(metadata.get("url") or "").strip()
         )
 
+    SCOPE_STOPWORDS = frozenset({
+        "about", "according", "after", "also", "because", "before", "being",
+        "can", "cannot", "could", "does", "doing", "done", "each", "even",
+        "from", "give", "given", "have", "having", "into", "islam", "islamic",
+        "just", "make", "many", "more", "most", "much", "must", "need",
+        "only", "other", "over", "same", "should", "some", "such", "than",
+        "that", "their", "them", "then", "there", "these", "they", "this",
+        "those", "under", "upon", "very", "what", "when", "where", "which",
+        "while", "will", "with", "would", "your", "yours", "allowed",
+        "permissible", "evidence", "ruling", "prayer",
+    })
+
+    @classmethod
+    def _scope_words(cls, text):
+        words = set()
+        for word in re.findall(r"[a-z]+", str(text or "").casefold()):
+            if len(word) < 4 or word in cls.SCOPE_STOPWORDS:
+                continue
+            words.add(word[:-1] if word.endswith("s") and len(word) > 4 else word)
+        return words
+
+    @classmethod
+    def _record_claim_scope_problem(cls, claim, question):
+        """Catch a claim that moves a fatwa onto the user's situation.
+
+        Fatwa Q&A only. Two code checks, no LLM:
+        1. The claim uses a word from the user's question (e.g. "parents")
+           that appears nowhere in the cited record, while the record
+           itself is about someone else (e.g. "distant relatives").
+        2. The cited quote rules for a third person ("she may give") and
+           the claim turns it into "you".
+        """
+        text = str(claim.get("text") or "")
+        quote = str(claim.get("quote") or "")
+        record_words = cls._scope_words(
+            f"{claim.get('source_question') or ''} {claim.get('source_answer') or ''} {quote}"
+        )
+        moved = (cls._scope_words(text) & cls._scope_words(question)) - record_words
+        if moved:
+            return "claim adds " + ", ".join(sorted(moved)) + " (not in the cited record)"
+        third_person = re.search(r"\b(?:she|he)\b", quote, re.I)
+        if (
+            third_person
+            and re.search(r"\byou\b", text, re.I)
+            and not re.search(r"\b(?:she|he|wife|husband)\b", text, re.I)
+            and not re.search(r"\byou\b", quote, re.I)
+        ):
+            return f"quote is about '{third_person.group(0)}', claim says 'you'"
+        return None
+
     @classmethod
     def _is_legal_status_question(cls, question):
         return bool(cls.LEGAL_STATUS_QUESTION.search(str(question or "")))
@@ -2685,6 +2812,7 @@ class RAGPipeline:
         # Filter out passages that discuss the same words but do not
         # actually answer the question. This is a candidate filter, not
         # a substitute for quote validation and claim verification.
+        primary_record_id = None
         if _retry_mode:
             print("[RAG RETRY] Using all reranked candidates for recovery", flush=True)
             excluded_ids = (_previous_attempt or {}).get("excluded_doc_ids") or set()
@@ -2703,6 +2831,13 @@ class RAGPipeline:
             passages = await self._select_relevant_passages(
                 retrieval_query, passages
             )
+            if (
+                passages
+                and self._is_legal_status_question(retrieval_query)
+                and self._is_record_passage(passages[0])
+            ):
+                # The selector puts its primary passage first.
+                primary_record_id = str(passages[0]["document"].get("id") or "")
         if passages:
             # Preserve at least one directly responsive source even if the
             # model's comparative selector incorrectly favored related topics.
@@ -2980,6 +3115,18 @@ class RAGPipeline:
                         "retry reused evidence already judged irrelevant",
                         self.MISSING_MESSAGE,
                     )
+        if record_mode and verified_claims:
+            scoped = []
+            for number, claim in enumerate(verified_claims, start=1):
+                if not self._is_record_passage(claim):
+                    scoped.append(claim)
+                    continue
+                problem = self._record_claim_scope_problem(claim, retrieval_query)
+                if problem:
+                    print(f"[RAG SCOPE] Dropped claim {number}: {problem}", flush=True)
+                else:
+                    scoped.append(claim)
+            verified_claims = scoped
         print(
             f"[RAG] Claims with valid quotes: "
             f"{len(verified_claims)}/{generated_count}",
@@ -3048,18 +3195,9 @@ class RAGPipeline:
         if not check["answers_question"]:
             if not _retry_mode:
                 print("[RAG RETRY] Answer did not address question", flush=True)
-                # Fatwa Q&A: also leave out records none of whose claims
-                # survived, so the retry cannot answer from them again.
-                failed_records = []
-                if record_mode:
-                    kept_ids = {id(c["document"]) for c in check["kept"]}
-                    failed_records = [
-                        c for c in verified_claims
-                        if id(c["document"]) not in kept_ids
-                    ]
                 return await self.generate(
                     question, conversation_history, madhhab, _retry_mode=True,
-                    _previous_attempt=self._retry_record("evidence does not answer the question", self.MISSING_MESSAGE, passages, check.get("irrelevant", []), failed_records),
+                    _previous_attempt=self._retry_record("evidence does not answer the question", self.MISSING_MESSAGE, passages, check.get("irrelevant", [])),
                 )
             return self._refuse(
                 "evidence does not answer the question",
@@ -3141,6 +3279,23 @@ class RAGPipeline:
             for concern in self._quality_coverage_report(retrieval_query, kept_claims):
                 print(f"[RAG QUALITY] Review needed: {concern}", flush=True)
         print(f"[RAG AUDIT] Relevant verified claims retained: {len(kept_claims)}", flush=True)
+        if primary_record_id and not any(
+            str(claim["document"].get("id") or "") == primary_record_id
+            for claim in kept_claims
+        ):
+            # "Is Witr wajib or sunnah?" answered only with a minority view
+            # while the main ruling record was supplied. Retry once with
+            # the wider candidate set; refuse if the retry fails as well.
+            print(
+                f"[RAG INTENT] Legal-status answer omits the primary record {primary_record_id}",
+                flush=True,
+            )
+            if not _retry_mode:
+                return await self.generate(
+                    question, conversation_history, madhhab, _retry_mode=True,
+                    _previous_attempt=self._retry_record("answer omitted the primary ruling record", self.INVALID_MESSAGE, passages),
+                )
+            return self._refuse("answer omitted the primary ruling record", self.INVALID_MESSAGE)
         if not self._direct_answer_shape_valid(retrieval_query, kept_claims):
             return self._refuse("audit removed the requested answer", self.INVALID_MESSAGE)
         if not hadith_request and not self._answer_is_complete(
