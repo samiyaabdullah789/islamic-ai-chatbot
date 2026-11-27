@@ -56,7 +56,9 @@ class RAGPipeline:
         r"optional|voluntary|nafl|nafila|permissible|impermissible|"
         r"permitted|allowed|halal|haram|forbidden|prohibited|makruh|"
         r"disliked|lawful|unlawful|valid|invalid|cannot|can not|may not|"
-        r"not\s+(?:obligatory|wajib|required|necessary))\b",
+        r"not\s+(?:obligatory|wajib|required|necessary)|sinful|"
+        r"(?:not|no)\s+(?:a\s+)?sin|assisting\s+in\s+sin|nothing\s+wrong|"
+        r"no\s+harm|no\s+problem|blameworthy|praiseworthy)\b",
         re.I,
     )
     # If fewer than this share of the generated claims survive
@@ -753,12 +755,52 @@ class RAGPipeline:
             else:
                 spans = [source] if source else []
         return spans[:40]
+    RECORD_LIST_ITEM = re.compile(r"^(?:\(?\d{1,2}[.)]|[a-z][.)])\s+\S")
+
+    @classmethod
+    def _record_evidence_spans(cls, source_answer):
+        """V: evidence spans for a fatwa record.
+
+        Inline enumerations such as "(1) `Abbas, (2) Harith" are part of
+        one sentence, not a numbered list, and heading lines such as
+        "The basis" are not evidence. Splitting on them shifted every
+        evidence ID by one, so a correct claim got the wrong quote.
+        Every span is still an exact substring of the record.
+        """
+        source = str(source_answer).strip()
+        spans = []
+        for line in re.split(r"\n+", source):
+            line = line.strip()
+            if not line:
+                continue
+            words = line.split()
+            if (
+                len(words) <= 6
+                and line[-1] not in ".!?:;\"')]”’"
+                and not cls.RECORD_LIST_ITEM.match(line)
+            ):
+                continue  # heading such as "The basis", "The proper way"
+            if cls.RECORD_LIST_ITEM.match(line):
+                spans.append(line)
+                continue
+            spans.extend(
+                part.strip()
+                for part in re.split(r"(?<=[.!?])\s+(?=[A-Z\[“\"])", line)
+                if part.strip()
+            )
+        return spans[:40] or ([source] if source else [])
+
     def _build_evidence_catalog(self, passages):
         catalog = {}
         blocks = []
         for passage in passages:
             idx = passage["source_index"]
-            for number, span in enumerate(self._evidence_spans(passage["source_answer"]), 1):
+            spans = (
+                self._record_evidence_spans(passage["source_answer"])
+                if self._is_record_passage(passage)
+                else self._evidence_spans(passage["source_answer"])
+            )
+            for number, span in enumerate(spans, 1):
                 evidence_id = f"P{idx}E{number}"
                 catalog[evidence_id] = (idx, span)
                 blocks.append(f"{evidence_id}: {span}")
@@ -865,6 +907,13 @@ class RAGPipeline:
                     return False
         if cls._is_legal_status_question(q) and not any(
             cls.LEGAL_STATUS_ANSWER.search(t) for t in texts
+        ) and not any(
+            # X: a fatwa record that gives its ruling without any status
+            # word ("would not be considered assisting in sin") cannot be
+            # quoted with one; the verified claim from it is the answer.
+            cls._is_record_passage(claim)
+            and not cls.LEGAL_STATUS_ANSWER.search(str(claim.get("source_answer") or ""))
+            for claim in claims
         ):
             # "Is Witr wajib or sunnah?" answered with how Witr is prayed.
             print("[RAG INTENT] Legal-status question, but no claim states a legal status", flush=True)
@@ -1810,6 +1859,29 @@ class RAGPipeline:
         chosen = list(dict.fromkeys(chosen))[:self.MAX_PASSAGES]
         by_index = {p["source_index"]: p for p in passages}
         if (
+            self._is_legal_status_question(question)
+            and not self._is_record_passage(by_index[primary])
+        ):
+            # U: a hadith narration rarely states a legal status; a fatwa
+            # record does. Put the selector's supporting record (or the
+            # best-ranked record) first and keep the hadith after it.
+            record = next(
+                (i for i in supporting if self._is_record_passage(by_index[i])),
+                None,
+            )
+            if record is None:
+                record = next(
+                    (p["source_index"] for p in passages if self._is_record_passage(p)),
+                    None,
+                )
+            if record is not None:
+                chosen = [record] + [i for i in chosen if i != record]
+                chosen = chosen[:self.MAX_PASSAGES]
+                print(
+                    f"[RAG SELECT] Legal-status question: record {record} placed before hadith {primary}",
+                    flush=True,
+                )
+        if (
             len(chosen) == 1
             and supporting
             and self._is_legal_status_question(question)
@@ -1837,6 +1909,13 @@ class RAGPipeline:
             if alternative is not None:
                 chosen.append(alternative)
         passage_map = {p["source_index"]: p for p in passages}
+        # S: mark the record the selector itself chose as the main
+        # evidence (or the supporting record U moved in front of a hadith).
+        # Passage dicts are built fresh for every request.
+        if self._is_record_passage(passage_map[chosen[0]]) and (
+            chosen[0] == primary or chosen[0] in supporting
+        ):
+            passage_map[chosen[0]]["selector_primary"] = True
         print(f"[RAG SELECT] Candidate evidence indexes: {chosen}", flush=True)
         return [passage_map[index] for index in chosen]
     @classmethod
@@ -2641,13 +2720,32 @@ class RAGPipeline:
         "permissible", "evidence", "ruling", "prayer",
     })
 
+    # T: one spelling for terms the records write in several ways.
+    TERM_VARIANTS = {
+        "sunna": "sunna", "sunnah": "sunna", "sunnat": "sunna", "sunnas": "sunna",
+        "sunnah's": "sunna", "sunan": "sunna",
+        "fard": "fard", "fardh": "fard", "farz": "fard", "fardh's": "fard",
+        "wajib": "wajib", "waajib": "wajib", "wajibs": "wajib",
+        "haram": "haram", "haraam": "haram",
+        "makruh": "makruh", "makrooh": "makruh", "makruhs": "makruh",
+        "mustahab": "mustahab", "mustahabb": "mustahab",
+        "tarawih": "tarawih", "taraweeh": "tarawih", "tarawee": "tarawih",
+        "ghusl": "ghusl", "ghusal": "ghusl",
+        "wudu": "wudu", "wudhu": "wudu", "wuzu": "wudu",
+        "salah": "salat", "salat": "salat", "salaah": "salat", "namaz": "salat",
+        "zakat": "zakat", "zakah": "zakat", "zakaat": "zakat",
+        "quran": "quran", "qur'an": "quran",
+    }
+
     @classmethod
     def _scope_words(cls, text):
         words = set()
         for word in re.findall(r"[a-z]+", str(text or "").casefold()):
+            word = cls.TERM_VARIANTS.get(word, word)
             if len(word) < 4 or word in cls.SCOPE_STOPWORDS:
                 continue
-            words.add(word[:-1] if word.endswith("s") and len(word) > 4 else word)
+            word = word[:-1] if word.endswith("s") and len(word) > 4 else word
+            words.add(cls.TERM_VARIANTS.get(word, word))
         return words
 
     @classmethod
@@ -2729,6 +2827,82 @@ class RAGPipeline:
         return best[1], best[2], best[3]
 
     RULING_WORDS = re.compile(r"\b(?:can|may|allowed|valid)\b", re.I)
+
+    # Q: legal-status classes. A record claim that names one of these
+    # must cite a quote naming the same class; "recommended" taken from
+    # a sentence about travellers must not become the general ruling.
+    STATUS_CLASSES = {
+        "obligatory": re.compile(r"\b(?:wajib|waajib|fard\w*|farz|obligat\w*|mandatory|compulsory)\b", re.I),
+        "sunna": re.compile(r"\b(?:sunna\w*|sunnat|sunan)\b", re.I),
+        "recommended": re.compile(r"\b(?:recommended|mustahabb?|mandub|desirable)\b", re.I),
+        "disliked": re.compile(r"\b(?:makruh|makrooh|disliked)\b", re.I),
+        "forbidden": re.compile(r"\b(?:haram|haraam|forbidden|prohibited|impermissible|unlawful|not\s+(?:be\s+)?(?:permissible|permitted))\b", re.I),
+    }
+
+    @classmethod
+    def _unquoted_status(cls, claim):
+        text = str(claim.get("text") or "")
+        quote = str(claim.get("quote") or "")
+        for name, pattern in cls.STATUS_CLASSES.items():
+            if pattern.search(text) and not pattern.search(quote):
+                return name
+        return None
+
+    @classmethod
+    def _record_madhhab(cls, claim):
+        metadata = (claim.get("document") or {}).get("metadata") or {}
+        value = str(metadata.get("madhhab") or "").strip()
+        return value if value in cls.ALLOWED_MADHHABS else None
+
+    KEEP_CAPITAL = frozenset({
+        "allah", "imam", "shaykh", "sheikh", "prophet", "messenger", "abu",
+        "ibn", "qur'an", "quran", "ramadan", "hajj", "friday", "muslims",
+    })
+
+    @classmethod
+    def _attribute_madhhab(cls, claims, selected_madhhab=None):
+        """R: name the school a fatwa ruling belongs to.
+
+        Hanafi and Shafi'i records can give opposite rulings; without the
+        school's name the user cannot tell which one they were given. The
+        name comes from the record's metadata, not from the model.
+        """
+        result = []
+        previous = None
+        for claim in claims:
+            school = cls._record_madhhab(claim) if cls._is_record_passage(claim) else None
+            text = str(claim.get("text") or "").strip()
+            if (
+                school
+                and school != selected_madhhab
+                and school != previous
+                and text
+                and not re.search(re.escape(school.split("'")[0]), text, re.I)
+                # "According to Abu Yusuf and Muhammad, ..." already names
+                # whose position it is.
+                and not re.match(r"(?i)according to\b", text)
+            ):
+                # A first sentence has nothing to contrast with.
+                text = re.sub(r"^(?:however|moreover|further(?:more)?|also|but|and|so)\b,?\s+", "", text, flags=re.I) or text
+                first = re.match(r"[A-Za-z']+", text)
+                word = first.group(0) if first else ""
+                source = str(claim.get("source_answer") or "")
+                # Keep the capital for a proper noun ("Tarawih", "Imam"):
+                # the record writes it capitalised in the middle of a sentence.
+                second = re.match(r"[A-Za-z']+\s+([A-Za-z])", text)
+                proper = bool(word) and (
+                    word.isupper() and len(word) > 1
+                    or word.casefold() in cls.KEEP_CAPITAL
+                    or bool(second and second.group(1).isupper())
+                    or re.search(r"[a-z,;]\s+" + re.escape(word) + r"\b", source)
+                    and not re.search(r"[a-z,;]\s+" + re.escape(word.lower()) + r"\b", source)
+                )
+                if word and not proper:
+                    text = text[0].lower() + text[1:]
+                claim = {**claim, "text": f"According to the {school} school, {text}"}
+            previous = school
+            result.append(claim)
+        return result
 
     @classmethod
     def _states_ruling(cls, text):
@@ -2910,8 +3084,8 @@ class RAGPipeline:
                 passages
                 # When selection fails or finds no primary it returns the
                 # top reranked passages unchanged; that is not a choice.
-                and len(passages) < min(candidate_count, self.MAX_PASSAGES)
-                and self._is_legal_status_question(retrieval_query)
+                # S: every fatwa question, not only "wajib or sunnah?".
+                and passages[0].get("selector_primary")
                 and self._is_record_passage(passages[0])
             ):
                 # The selector puts its primary passage first.
@@ -3062,11 +3236,19 @@ class RAGPipeline:
                 "For a question about legal status, state the status in the "
                 "passage's own terms (obligatory, wajib, sunna, permissible, "
                 "not permissible).\n"
+                "COMPLETE ANSWER: from the passage whose source question "
+                "matches the user's question, give (1) the ruling, (2) the "
+                "reason the passage gives for it, and (3) any condition, "
+                "exception or limit it states (for example 'while "
+                "travelling', 'only if ...', 'unless ...'), each as its own "
+                "claim with its own evidence_id. Never drop a condition that "
+                "limits the ruling. Each claim must be a full sentence that "
+                "names the act it is about. Use at most 4 claims per passage.\n"
             )
             required = next(
                 (
                     p["source_index"] for p in passages
-                    if _retry_mode and primary_record_id
+                    if primary_record_id
                     and str(p["document"].get("id") or "") == primary_record_id
                 ),
                 None,
@@ -3223,6 +3405,9 @@ class RAGPipeline:
                     scoped.append(claim)
                     continue
                 problem = self._record_claim_scope_problem(claim, retrieval_query)
+                status = self._unquoted_status(claim)
+                if status and not problem:
+                    problem = f"claim says '{status}' but its cited quote does not"
                 if problem:
                     print(f"[RAG SCOPE] Dropped claim {number}: {problem}", flush=True)
                 else:
@@ -3373,9 +3558,15 @@ class RAGPipeline:
             protected = [
                 claim for claim in kept_claims
                 if self._is_record_passage(claim)
-                and self._states_ruling(claim["text"])
                 and (
-                    (asked_relations and asked_relations & self._relationship_groups(claim["text"]))
+                    (
+                        self._states_ruling(claim["text"])
+                        and asked_relations
+                        and asked_relations & self._relationship_groups(claim["text"])
+                    )
+                    # W: the primary record's ruling, reason and conditions
+                    # all passed the verifier; the audit alone cannot cut
+                    # the reason or condition out of the answer.
                     or (primary_record_id and str(claim["document"].get("id") or "") == primary_record_id)
                 )
             ]
@@ -3464,7 +3655,7 @@ class RAGPipeline:
             # while the main ruling record was supplied. Retry once with
             # the wider candidate set; refuse if the retry fails as well.
             print(
-                f"[RAG INTENT] Legal-status answer omits the primary record {primary_record_id}",
+                f"[RAG INTENT] Answer omits the primary record {primary_record_id}",
                 flush=True,
             )
             if not _retry_mode:
@@ -3494,7 +3685,18 @@ class RAGPipeline:
                     kept_claims,
                     key=lambda c: str(c["document"].get("id") or "") != primary_record_id,
                 )
-            answer = self._assemble_answer(kept_claims, question=retrieval_query)
+            if record_mode:
+                # Group each school's claims together, then name the school.
+                order = []
+                for claim in kept_claims:
+                    school = self._record_madhhab(claim)
+                    if school not in order:
+                        order.append(school)
+                kept_claims = sorted(kept_claims, key=lambda c: order.index(self._record_madhhab(c)))
+                display_claims = self._attribute_madhhab(kept_claims, madhhab)
+            else:
+                display_claims = kept_claims
+            answer = self._assemble_answer(display_claims, question=retrieval_query)
             if not answer or self._is_incomplete_answer(answer):
                 return self._refuse(
                     "assembled answer incomplete",
