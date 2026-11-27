@@ -2737,6 +2737,19 @@ class RAGPipeline:
         "quran": "quran", "qur'an": "quran",
     }
 
+    @staticmethod
+    def _word_stem(word):
+        """Y: "breaking"/"break", "invalidated"/"invalidate" share a stem."""
+        for suffix in ("ing", "ed", "es", "s"):
+            if word.endswith(suffix) and len(word) - len(suffix) >= 4:
+                word = word[:-len(suffix)]
+                break
+        if len(word) > 4 and word[-1] == word[-2] and word[-1] not in "aeiouls":
+            word = word[:-1]  # "stopp" -> "stop"
+        if word.endswith("e") and len(word) > 4:
+            word = word[:-1]
+        return word
+
     @classmethod
     def _scope_words(cls, text):
         words = set()
@@ -2744,8 +2757,15 @@ class RAGPipeline:
             word = cls.TERM_VARIANTS.get(word, word)
             if len(word) < 4 or word in cls.SCOPE_STOPWORDS:
                 continue
+            if word in cls.TERM_VARIANTS.values():
+                words.add(word)
+                continue
             word = word[:-1] if word.endswith("s") and len(word) > 4 else word
-            words.add(cls.TERM_VARIANTS.get(word, word))
+            word = cls.TERM_VARIANTS.get(word, word)
+            if word in cls.TERM_VARIANTS.values():
+                words.add(word)
+                continue
+            words.add(cls._word_stem(word))
         return words
 
     @classmethod
@@ -2847,6 +2867,53 @@ class RAGPipeline:
             if pattern.search(text) and not pattern.search(quote):
                 return name
         return None
+
+    FRAGMENT_START = re.compile(r"^(?:[a-z]|(?:and|or|while|but|though|then|as well as)\b)", re.I)
+
+    @classmethod
+    def _merge_fragment_claims(cls, claims):
+        """Z: the model sometimes cuts one source sentence into pieces
+        ("... 'assisting in sin,'", "and seek Allah's refuge ...").
+        When several claims cite the same record sentence and one of them
+        is such a piece, show that verified source sentence once instead.
+        """
+        groups = {}
+        for claim in claims:
+            if not cls._is_record_passage(claim):
+                continue
+            key = cls._evidence_key(claim)
+            groups.setdefault(key, []).append(claim)
+        replace = {}
+        for key, group in groups.items():
+            quote = " ".join(str(group[0].get("quote") or "").split())
+            if len(group) < 2 or not quote or len(quote) > 600:
+                continue
+            fragment = any(
+                cls.FRAGMENT_START.match(str(c.get("text") or "").strip())
+                and not str(c.get("text") or "").strip()[:1].isupper()
+                or str(c.get("text") or "").strip().endswith((",", ",'", ",\"", ",’", ",”"))
+                for c in group
+            )
+            if fragment:
+                replace[key] = {**group[0], "text": quote}
+        if not replace:
+            return claims
+        merged = []
+        done = set()
+        for claim in claims:
+            key = cls._evidence_key(claim) if cls._is_record_passage(claim) else None
+            if key in replace:
+                if key not in done:
+                    merged.append(replace[key])
+                    done.add(key)
+                continue
+            merged.append(claim)
+        print(
+            f"[RAG QUALITY] Joined {len(claims) - len(merged)} sentence fragment claim(s) "
+            "into the cited source sentence",
+            flush=True,
+        )
+        return merged
 
     @classmethod
     def _record_madhhab(cls, claim):
@@ -3686,6 +3753,7 @@ class RAGPipeline:
                     key=lambda c: str(c["document"].get("id") or "") != primary_record_id,
                 )
             if record_mode:
+                kept_claims = self._merge_fragment_claims(kept_claims)
                 # Group each school's claims together, then name the school.
                 order = []
                 for claim in kept_claims:
