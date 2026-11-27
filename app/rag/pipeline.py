@@ -984,6 +984,17 @@ class RAGPipeline:
             if evidence_catalog is not None:
                 resolved = evidence_catalog.get(evidence_id) if isinstance(evidence_id, str) else None
                 if resolved is None:
+                    resolved = self._match_record_evidence(
+                        item.get("text"), index, evidence_catalog, passage_map
+                    )
+                    if resolved is not None:
+                        print(
+                            f"[RAG EVIDENCE] Claim {position}: invalid evidence ID "
+                            f"{evidence_id!r}; matched claim text to {resolved[2]}",
+                            flush=True,
+                        )
+                        resolved = resolved[:2]
+                if resolved is None:
                     print(f"[RAG EVIDENCE] Claim {position}: invalid evidence ID", flush=True)
                     continue
                 if resolved[0] != index:
@@ -2690,6 +2701,40 @@ class RAGPipeline:
         return groups
 
     @classmethod
+    def _match_record_evidence(cls, text, index, evidence_catalog, passage_map):
+        """Fatwa records only: find the evidence span a claim was written from.
+
+        Used when the model returns an evidence ID that is not in the
+        catalog. The claim still goes through quote and verifier checks.
+        Returns (passage index, span, evidence ID) or None.
+        """
+        words = set(re.findall(r"[a-z]+", str(text or "").casefold()))
+        if len(words) < 4:
+            return None
+        best = None
+        for evidence_id, (idx, span) in evidence_catalog.items():
+            passage = passage_map.get(idx)
+            if passage is None or not cls._is_record_passage(passage):
+                continue
+            span_words = set(re.findall(r"[a-z]+", span.casefold()))
+            if not span_words:
+                continue
+            score = len(words & span_words) / len(words)
+            if idx == index:
+                score += 0.05
+            if best is None or score > best[0]:
+                best = (score, idx, span, evidence_id)
+        if best is None or best[0] < 0.7:
+            return None
+        return best[1], best[2], best[3]
+
+    RULING_WORDS = re.compile(r"\b(?:can|may|allowed|valid)\b", re.I)
+
+    @classmethod
+    def _states_ruling(cls, text):
+        return bool(cls.LEGAL_STATUS_ANSWER.search(text) or cls.RULING_WORDS.search(text))
+
+    @classmethod
     def _is_legal_status_question(cls, question):
         return bool(cls.LEGAL_STATUS_QUESTION.search(str(question or "")))
 
@@ -2857,11 +2902,15 @@ class RAGPipeline:
                     flush=True,
                 )
         else:
+            candidate_count = len(passages)
             passages = await self._select_relevant_passages(
                 retrieval_query, passages
             )
             if (
                 passages
+                # When selection fails or finds no primary it returns the
+                # top reranked passages unchanged; that is not a choice.
+                and len(passages) < min(candidate_count, self.MAX_PASSAGES)
                 and self._is_legal_status_question(retrieval_query)
                 and self._is_record_passage(passages[0])
             ):
@@ -2946,6 +2995,9 @@ class RAGPipeline:
             _retry_mode
             and _previous_attempt
             and _previous_attempt.get("passage_ids") == self._passage_ids(passages)
+            # This retry uses a different prompt (it names the passage that
+            # holds the main ruling), so the same evidence is not a repeat.
+            and not primary_record_id
         ):
             # Same evidence, same question and the same prompt: the model
             # would fail exactly as before. Return the first attempt's
@@ -3011,6 +3063,20 @@ class RAGPipeline:
                 "passage's own terms (obligatory, wajib, sunna, permissible, "
                 "not permissible).\n"
             )
+            required = next(
+                (
+                    p["source_index"] for p in passages
+                    if _retry_mode and primary_record_id
+                    and str(p["document"].get("id") or "") == primary_record_id
+                ),
+                None,
+            )
+            if required is not None:
+                system_prompt += (
+                    f"REQUIRED: PASSAGE {required} gives the main ruling for "
+                    "this question. Include at least one claim taken from "
+                    f"PASSAGE {required}, then add other positions if present.\n"
+                )
         messages = [
             {
                 "role": "system",
@@ -3296,6 +3362,38 @@ class RAGPipeline:
             passages=passages if record_mode else all_passages_for_audit,
             record_mode=record_mode,
         )
+        asked_relations = (
+            self._relationship_groups(retrieval_query) if record_mode else set()
+        )
+        if record_mode:
+            # M: a verified claim that states the ruling for the person asked
+            # about (or comes from the primary ruling record) is not removed
+            # by the audit alone; the 8B auditor kept rejecting "zakat cannot
+            # be given to your parents" for "Can I give zakat to my parents?".
+            protected = [
+                claim for claim in kept_claims
+                if self._is_record_passage(claim)
+                and self._states_ruling(claim["text"])
+                and (
+                    (asked_relations and asked_relations & self._relationship_groups(claim["text"]))
+                    or (primary_record_id and str(claim["document"].get("id") or "") == primary_record_id)
+                )
+            ]
+            if protected:
+                audited = (
+                    audit_result.get("claims", [])
+                    if isinstance(audit_result, dict) and audit_result.get("answers_question")
+                    else []
+                )
+                keep_ids = {id(c) for c in audited} | {id(c) for c in protected}
+                merged = [c for c in kept_claims if id(c) in keep_ids]
+                restored = len(merged) - len(audited)
+                if restored > 0:
+                    print(
+                        f"[RAG AUDIT] Kept {restored} verified direct-ruling claim(s) the audit rejected",
+                        flush=True,
+                    )
+                audit_result = {"claims": merged, "answers_question": True}
         if not isinstance(audit_result, dict) or not audit_result.get("answers_question"):
             if not _retry_mode:
                 print("[RAG RETRY] Relevance audit failed; retrying", flush=True)
@@ -3327,9 +3425,20 @@ class RAGPipeline:
             for concern in self._quality_coverage_report(retrieval_query, kept_claims):
                 print(f"[RAG QUALITY] Review needed: {concern}", flush=True)
         print(f"[RAG AUDIT] Relevant verified claims retained: {len(kept_claims)}", flush=True)
-        asked_relations = (
-            self._relationship_groups(retrieval_query) if record_mode else set()
-        )
+        if asked_relations:
+            # N: drop claims about a different relationship only
+            # (e.g. "distant relatives" when the question is about parents).
+            other = [
+                c for c in kept_claims
+                if self._relationship_groups(c["text"])
+                and not (asked_relations & self._relationship_groups(c["text"]))
+            ]
+            if other and len(other) < len(kept_claims):
+                print(
+                    f"[RAG INTENT] Dropped {len(other)} claim(s) about a different relationship",
+                    flush=True,
+                )
+                kept_claims = [c for c in kept_claims if c not in other]
         if asked_relations and not (
             asked_relations
             & self._relationship_groups(" ".join(c["text"] for c in kept_claims))
