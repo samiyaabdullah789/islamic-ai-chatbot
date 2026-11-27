@@ -1426,7 +1426,7 @@ class RAGPipeline:
             "answers_question": answers_question,
             "irrelevant": irrelevant,
         }
-    async def _audit_answer_relevance(self, question, claims, passages):
+    async def _audit_answer_relevance(self, question, claims, passages, record_mode=False):
         """Independently audit relevance without trusting malformed model output.
 
         Retry one time on malformed output or an internal relevance/sufficiency
@@ -1492,7 +1492,15 @@ class RAGPipeline:
             "For a broad explanatory request, a single isolated detail may "
             "be insufficient unless the answer explicitly states its limits. "
             "Do not infer missing facts or use outside religious knowledge. "
-            "Return exactly one entry for EACH numbered claim, with IDs "
+            + (
+                "Each passage answers another person's question. A claim "
+                "that directly states the ruling for the exact act and the "
+                "person or relationship in the user's question is relevant, "
+                "even when another passage gives a ruling for a different "
+                "person or situation. "
+                if record_mode else ""
+            )
+            + "Return exactly one entry for EACH numbered claim, with IDs "
             "1 through the number of claims, no missing or extra entries. "
             "Return JSON only, in the shape: "
             '{"claims":[{"id":1,"relevant":true}],"answers_question":true}'
@@ -2660,6 +2668,27 @@ class RAGPipeline:
             return f"quote is about '{third_person.group(0)}', claim says 'you'"
         return None
 
+    IN_LAW_PATTERN = re.compile(r"\b(?:in[- ]laws?|(?:mother|father|son|daughter|brother|sister)[- ]in[- ]laws?)\b", re.I)
+    RELATIONSHIP_GROUPS = {
+        "parents": re.compile(r"\b(?:parents?|mother|father|mom|mum|dad)\b", re.I),
+        "spouse": re.compile(r"\b(?:wife|wives|husband|spouses?)\b", re.I),
+        "children": re.compile(r"\b(?:child|children|sons?|daughters?|kids?)\b", re.I),
+        "siblings": re.compile(r"\b(?:brothers?|sisters?|siblings?)\b", re.I),
+        "grandparents": re.compile(r"\b(?:grandparents?|grandmother|grandfather)\b", re.I),
+        "relatives": re.compile(r"\b(?:relatives?|kin|kinship)\b", re.I),
+    }
+
+    @classmethod
+    def _relationship_groups(cls, text):
+        text = str(text or "")
+        groups = {"in-laws"} if cls.IN_LAW_PATTERN.search(text) else set()
+        text = cls.IN_LAW_PATTERN.sub(" ", text)
+        groups.update(
+            name for name, pattern in cls.RELATIONSHIP_GROUPS.items()
+            if pattern.search(text)
+        )
+        return groups
+
     @classmethod
     def _is_legal_status_question(cls, question):
         return bool(cls.LEGAL_STATUS_QUESTION.search(str(question or "")))
@@ -2892,6 +2921,12 @@ class RAGPipeline:
                     f"{[p['source_index'] for p in extras]}", flush=True,
                 )
                 passages.extend(extras)
+        if _retry_mode and (_previous_attempt or {}).get("primary_record_id"):
+            # Retry after an answer that left out the main ruling: keep
+            # requiring it (and putting it first) if that record is present.
+            carried = _previous_attempt["primary_record_id"]
+            if any(str(p["document"].get("id") or "") == carried for p in passages[:self.MAX_PASSAGES]):
+                primary_record_id = carried
         # Keep a wider candidate pool for evidence comparison, but do not
         # enlarge the generation prompt beyond the established passage limit.
         # Every selected claim still passes exact-quote verification and audit.
@@ -3252,17 +3287,30 @@ class RAGPipeline:
             return self._refuse("answer type does not match question", self.INVALID_MESSAGE)
         # A second, comparative relevance check sees every retrieved
         # passage, not only the passages cited by the answer.
+        # Fatwa Q&A: audit against the passages the answer was built from.
+        # With every candidate shown, the auditor confused the record that
+        # answers the question with a record about a different relative.
         audit_result = await self._audit_answer_relevance(
             question=retrieval_query,
             claims=kept_claims,
-            passages=all_passages_for_audit,
+            passages=passages if record_mode else all_passages_for_audit,
+            record_mode=record_mode,
         )
         if not isinstance(audit_result, dict) or not audit_result.get("answers_question"):
             if not _retry_mode:
                 print("[RAG RETRY] Relevance audit failed; retrying", flush=True)
                 return await self.generate(
                     question, conversation_history, madhhab, _retry_mode=True,
-                    _previous_attempt=self._retry_record("independent relevance audit rejected the answer", self.INVALID_MESSAGE, passages, [claim for claim in kept_claims if claim not in audit_result.get("claims", [])] if isinstance(audit_result, dict) else []),
+                    _previous_attempt=self._retry_record(
+                        "independent relevance audit rejected the answer", self.INVALID_MESSAGE, passages,
+                        # Fatwa Q&A: these claims already passed the verifier
+                        # as supported and relevant. An audit-only rejection
+                        # must not block that evidence on the retry.
+                        [] if record_mode else (
+                            [claim for claim in kept_claims if claim not in audit_result.get("claims", [])]
+                            if isinstance(audit_result, dict) else []
+                        ),
+                    ),
                 )
             return self._refuse(
                 "independent relevance audit rejected the answer",
@@ -3279,6 +3327,26 @@ class RAGPipeline:
             for concern in self._quality_coverage_report(retrieval_query, kept_claims):
                 print(f"[RAG QUALITY] Review needed: {concern}", flush=True)
         print(f"[RAG AUDIT] Relevant verified claims retained: {len(kept_claims)}", flush=True)
+        asked_relations = (
+            self._relationship_groups(retrieval_query) if record_mode else set()
+        )
+        if asked_relations and not (
+            asked_relations
+            & self._relationship_groups(" ".join(c["text"] for c in kept_claims))
+        ):
+            # "Can I give zakat to my parents?" answered with a ruling about
+            # distant relatives: true, but not about the person asked about.
+            print(
+                "[RAG INTENT] Answer does not mention the relationship asked about: "
+                + ", ".join(sorted(asked_relations)),
+                flush=True,
+            )
+            if not _retry_mode:
+                return await self.generate(
+                    question, conversation_history, madhhab, _retry_mode=True,
+                    _previous_attempt=self._retry_record("answer is about a different relationship", self.INVALID_MESSAGE, passages),
+                )
+            return self._refuse("answer is about a different relationship", self.INVALID_MESSAGE)
         if primary_record_id and not any(
             str(claim["document"].get("id") or "") == primary_record_id
             for claim in kept_claims
@@ -3293,7 +3361,10 @@ class RAGPipeline:
             if not _retry_mode:
                 return await self.generate(
                     question, conversation_history, madhhab, _retry_mode=True,
-                    _previous_attempt=self._retry_record("answer omitted the primary ruling record", self.INVALID_MESSAGE, passages),
+                    _previous_attempt={
+                        **self._retry_record("answer omitted the primary ruling record", self.INVALID_MESSAGE, passages),
+                        "primary_record_id": primary_record_id,
+                    },
                 )
             return self._refuse("answer omitted the primary ruling record", self.INVALID_MESSAGE)
         if not self._direct_answer_shape_valid(retrieval_query, kept_claims):
@@ -3308,6 +3379,12 @@ class RAGPipeline:
         if hadith_request:
             answer = kept_claims[0]["text"]
         else:
+            if primary_record_id:
+                # Main ruling first, other scholars' positions after it.
+                kept_claims = sorted(
+                    kept_claims,
+                    key=lambda c: str(c["document"].get("id") or "") != primary_record_id,
+                )
             answer = self._assemble_answer(kept_claims, question=retrieval_query)
             if not answer or self._is_incomplete_answer(answer):
                 return self._refuse(
@@ -3327,8 +3404,20 @@ class RAGPipeline:
                     claim["document"]
                 )
                 for claim in kept_claims
+                if not self._is_record_passage(claim)
             )
         )
+        # Fatwa Q&A sources (SeekersGuidance etc.) are not shown to the user
+        # (product decision); they stay in the server log for review.
+        hidden_sources = list(
+            dict.fromkeys(
+                self._build_citation(claim["document"])
+                for claim in kept_claims
+                if self._is_record_passage(claim)
+            )
+        )
+        for source in hidden_sources:
+            print(f"[RAG SOURCE] Not shown to user: {source}", flush=True)
         print(
             "[RAG] Verified evidence indexes: "
             f"{sorted({c['source_index'] for c in kept_claims})}",
@@ -3343,6 +3432,8 @@ class RAGPipeline:
             f"{time.perf_counter() - pipeline_start:.2f}s",
             flush=True,
         )
+        if not citations:
+            return answer
         return (
             answer
             + "\n\n"
