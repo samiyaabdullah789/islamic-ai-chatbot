@@ -1,0 +1,162 @@
+{
+  "description": "SeekersGuidance Batch 1 (source 2) regression set. PASS = answered and an expected record reached generation; it does not check that the ruling is right, so read the zakat-own-parents answer (correct Hanafi ruling: not to one's own parents; in-laws are fine).",
+  "source_id": 2,
+  "ref_type": "doc_id",
+  "cases": [
+    {
+      "id": "witr-status-en",
+      "category": "fiqh",
+      "type": "answer",
+      "question": "Is Witr prayer wajib or sunnah?",
+      "expected_doc_ids": [
+        "source-2-chunk-61-",
+        "source-2-chunk-360-",
+        "source-2-chunk-747-"
+      ]
+    },
+    {
+      "id": "witr-status-ru",
+      "category": "roman_urdu",
+      "type": "answer",
+      "question": "witr namaz wajib hai ya sunnat?",
+      "expected_doc_ids": [
+        "source-2-chunk-61-",
+        "source-2-chunk-360-",
+        "source-2-chunk-747-"
+      ],
+      "language": "roman_urdu"
+    },
+    {
+      "id": "witr-makeup-en",
+      "category": "fiqh",
+      "type": "answer",
+      "question": "Do I have to make up a missed Witr prayer?",
+      "expected_doc_ids": [
+        "source-2-chunk-61-",
+        "source-2-chunk-360-"
+      ]
+    },
+    {
+      "id": "zakat-own-parents",
+      "category": "fiqh",
+      "type": "answer",
+      "question": "Can I give zakat to my parents?",
+      "expected_doc_ids": [
+        "source-2-chunk-304-"
+      ]
+    },
+    {
+      "id": "zakat-wife-inlaws",
+      "category": "fiqh",
+      "type": "answer",
+      "question": "Can my wife give her zakat to my parents?",
+      "expected_doc_ids": [
+        "source-2-chunk-14-"
+      ]
+    },
+    {
+      "id": "zakat-family",
+      "category": "fiqh",
+      "type": "answer",
+      "question": "Can my family and I pay our zakat together?",
+      "expected_doc_ids": [
+        "source-2-chunk-183-"
+      ]
+    },
+    {
+      "id": "tarawih",
+      "category": "fiqh",
+      "type": "answer",
+      "question": "Is tarawih prayer sunnah?",
+      "expected_doc_ids": [
+        "source-2-chunk-16-"
+      ]
+    },
+    {
+      "id": "plane-shorten",
+      "category": "fiqh",
+      "type": "answer",
+      "question": "Can I shorten my prayers after the plane has landed in my home city?",
+      "expected_doc_ids": [
+        "source-2-chunk-47-"
+      ]
+    },
+    {
+      "id": "braids-ghusl",
+      "category": "fiqh",
+      "type": "answer",
+      "question": "Do women have to untie their braids for wudu or ghusl?",
+      "expected_doc_ids": [
+        "source-2-chunk-116-"
+      ]
+    },
+    {
+      "id": "skip-verses",
+      "category": "fiqh",
+      "type": "answer",
+      "question": "Is it allowed to skip verses during recitation in prayer?",
+      "expected_doc_ids": [
+        "source-2-chunk-204-"
+      ]
+    },
+    {
+      "id": "missed-prayer-kufr",
+      "category": "fiqh",
+      "type": "answer",
+      "question": "Does missing one prayer make a person a disbeliever?",
+      "expected_doc_ids": [
+        "source-2-chunk-213-"
+      ]
+    },
+    {
+      "id": "quran-impure-clothes",
+      "category": "fiqh",
+      "type": "answer",
+      "question": "Can I recite the Quran while wearing impure clothes?",
+      "expected_doc_ids": [
+        "source-2-chunk-224-"
+      ]
+    },
+    {
+      "id": "ghusl-feces",
+      "category": "fiqh",
+      "type": "answer",
+      "question": "Do I need to take a ghusl after stepping on feces?",
+      "expected_doc_ids": [
+        "source-2-chunk-154-"
+      ]
+    },
+    {
+      "id": "nails-ru",
+      "category": "roman_urdu",
+      "type": "answer",
+      "question": "kya aurat ke liye nakhun barhana jaiz hai?",
+      "expected_doc_ids": [
+        "source-2-chunk-84-"
+      ],
+      "language": "roman_urdu"
+    },
+    {
+      "id": "plane-prayer-ur",
+      "category": "urdu",
+      "type": "answer",
+      "question": "کیا میں ہوائی جہاز میں نماز پڑھ سکتا ہوں؟",
+      "expected_doc_ids": [
+        "source-2-chunk-237-"
+      ],
+      "language": "urdu"
+    },
+    {
+      "id": "france",
+      "category": "off_topic",
+      "type": "refuse",
+      "question": "What is the capital of France?"
+    },
+    {
+      "id": "world-cup",
+      "category": "off_topic",
+      "type": "refuse",
+      "question": "Who won the 2022 FIFA World Cup?"
+    }
+  ]
+}
