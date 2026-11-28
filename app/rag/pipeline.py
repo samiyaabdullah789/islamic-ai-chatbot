@@ -970,6 +970,12 @@ class RAGPipeline:
             if match:
                 source_key = claim.get("source_index")
                 numbered_by_source.setdefault(source_key, set()).add(int(match.group(1)))
+                # V2: "1) Testifying ... 2) Establishing prayer 3) Giving
+                # Zakat ..." is a whole list written on one line; count every
+                # item marker inside the verified quote, not only the first.
+                numbered_by_source[source_key].update(
+                    int(n) for n in re.findall(r"(?:^|\s)(\d{1,2})[.)]\s+(?=[A-Za-z])", quote)
+                )
         if numbered_by_source:
             expected = set(range(1, count + 1))
             if any(expected.issubset(numbers) for numbers in numbered_by_source.values()):
@@ -1922,6 +1928,9 @@ class RAGPipeline:
     def _claim_semantic_key(cls, text):
         """Normalize cosmetic differences for conservative duplicate detection."""
         text = cls._clean_pdf_display_text(str(text)).casefold()
+        # AA: British/American spelling of one narration
+        # ("endeavours"/"endeavors", "honour"/"honor") is the same claim.
+        text = re.sub(r"\b(\w{2,})our(s|ed|ing)?\b", r"\1or\2", text)
         text = re.sub(r"\b(?:allah.s apostle|the prophet|prophet muhammad)\s+(?:said|taught|instructed)\s*(?:that|:)?\s*", "", text)
         text = re.sub(r"\b(?:according to the prophet|as stated by the prophet)\b", "", text)
         return cls._normalize_text(text)
@@ -3201,6 +3210,14 @@ class RAGPipeline:
                 answer_text = candidate["source_answer"].casefold()
                 if not any(re.search(r"\b" + re.escape(term) + r"\b", answer_text)
                            for term in topics):
+                    continue
+                if self._is_record_passage(candidate) and re.search(
+                    r"\b(?:reward|punishment|penalty|ruling|virtue|benefit|status|wisdom)s?\b",
+                    retrieval_query, re.I,
+                ):
+                    # AB: "What is the reward of telling the truth?" is not a
+                    # definition question. Adding fatwa records here pushed the
+                    # hadith the selector chose out of the answer.
                     continue
                 extras.append(candidate)
                 if len(extras) >= 3:
