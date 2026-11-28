@@ -3322,9 +3322,11 @@ class RAGPipeline:
             )
             if required is not None:
                 system_prompt += (
-                    f"REQUIRED: PASSAGE {required} gives the main ruling for "
-                    "this question. Include at least one claim taken from "
-                    f"PASSAGE {required}, then add other positions if present.\n"
+                    f"MAIN RECORD: PASSAGE {required} was selected as the main "
+                    "ruling for this question. Include at least one claim taken "
+                    f"from PASSAGE {required} if its source question matches the "
+                    "user's act and the person involved; otherwise do not use it. "
+                    "Then add other positions if present.\n"
                 )
         messages = [
             {
@@ -3720,12 +3722,21 @@ class RAGPipeline:
         ):
             # "Is Witr wajib or sunnah?" answered only with a minority view
             # while the main ruling record was supplied. Retry once with
-            # the wider candidate set; refuse if the retry fails as well.
+            # the wider candidate set.
             print(
                 f"[RAG INTENT] Answer omits the primary record {primary_record_id}",
                 flush=True,
             )
-            if not _retry_mode:
+            if _retry_mode:
+                # S2: the selector's choice can itself be wrong ("Can my wife
+                # give zakat to my parents?" -> the record about one's OWN
+                # parents). A retry answer that passed every check is kept,
+                # with its school named, instead of being refused.
+                print(
+                    "[RAG INTENT] Retry also omits the primary record; keeping the verified answer",
+                    flush=True,
+                )
+            else:
                 return await self.generate(
                     question, conversation_history, madhhab, _retry_mode=True,
                     _previous_attempt={
@@ -3733,7 +3744,6 @@ class RAGPipeline:
                         "primary_record_id": primary_record_id,
                     },
                 )
-            return self._refuse("answer omitted the primary ruling record", self.INVALID_MESSAGE)
         if not self._direct_answer_shape_valid(retrieval_query, kept_claims):
             return self._refuse("audit removed the requested answer", self.INVALID_MESSAGE)
         if not hadith_request and not self._answer_is_complete(
