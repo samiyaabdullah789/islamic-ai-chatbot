@@ -19,6 +19,8 @@ __pycache__/
 
 # JSON source data
 data/**/*.json
+# SeekersGuidance batches are needed on the server for ingestion
+!data/sources/new_sources/*.json
 
 # Cleaned and raw JSON folders
 data/raw_json/
